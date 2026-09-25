@@ -1101,7 +1101,8 @@ class ShellOrchestrator:
         if self.all_findings:
             by_severity = {}
             for f in self.all_findings:
-                sev = f.get("severity", "info").lower()
+                raw_sev = f.get("severity", "info")
+                sev = self._severity_label(raw_sev).lower() if isinstance(raw_sev, int) else str(raw_sev).lower()
                 by_severity[sev] = by_severity.get(sev, 0) + 1
 
             for sev in ["critical", "high", "medium", "low", "info"]:

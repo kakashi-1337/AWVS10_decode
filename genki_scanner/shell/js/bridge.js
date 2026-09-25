@@ -53,10 +53,17 @@ class THTTPResponse {
     }
 }
 
-// ---- THTTPRequest (helper for addHeader) ----
+// ---- THTTPRequest (helper for addHeader, also standalone) ----
 class THTTPRequest {
     constructor(job) {
-        this._job = job;
+        if (job) {
+            this._job = job;
+        } else {
+            this._job = { _reqHeaders: {}, _body: '', verb: 'GET', URI: '/' };
+        }
+        this.URI = this._job.URI || '/';
+        this.Verb = this._job.verb || 'GET';
+        this.body = this._job._body || '';
     }
 
     addHeader(name, value, replace) {
@@ -81,8 +88,8 @@ class THTTPRequest {
     }
 
     toString() {
-        const url = this._job._buildUrl ? this._job._buildUrl() : this._job.URI;
-        return `${this._job.verb} ${url} HTTP/1.1\r\n${this.headersString}\r\n${this._job._body || ''}`;
+        const url = this._job._buildUrl ? this._job._buildUrl() : this.URI;
+        return `${this.Verb || this._job.verb} ${url} HTTP/1.1\r\n${this.headersString}\r\n${this.body || this._job._body || ''}`;
     }
 }
 
@@ -113,6 +120,14 @@ class THTTPJob {
 
     set postData(v) { this._body = v; this._postData = v; }
     get postData() { return this._postData; }
+
+    setURL(turlOrStr) {
+        if (turlOrStr && typeof turlOrStr === 'object') {
+            this.url = turlOrStr;
+        } else if (typeof turlOrStr === 'string') {
+            this.url = new TURL(turlOrStr);
+        }
+    }
 
     get uri() { return this.URI; }
     set uri(v) { this.URI = v; }
@@ -295,6 +310,25 @@ class TURL {
         const h = this.host;
         const p = this._parsed && this._parsed.port ? this._parsed.port : '';
         return p ? `${h}:${p}` : h;
+    }
+
+    get uri() { return this._parsed ? (this._parsed.pathname + this._parsed.search) : '/'; }
+    set uri(v) {
+        if (this._parsed) {
+            const parts = v.split('?');
+            this._parsed.pathname = parts[0];
+            if (parts.length > 1) this._parsed.search = '?' + parts.slice(1).join('?');
+        }
+    }
+
+    canonicalize(relUrl) {
+        if (!relUrl) return new TURL(this.url);
+        try {
+            const resolved = new URL(relUrl, this.url);
+            return new TURL(resolved.toString());
+        } catch {
+            return new TURL(relUrl);
+        }
     }
 
     toString() { return this.url; }
@@ -763,6 +797,11 @@ function addLinkToCrawler(uri, root) {
     _output('trace', { message: `[CRAWL] Discovered link: ${uri}` });
 }
 
+function addHTTPRequestToCrawler(req) {
+    const uri = (req && req.URI) || '';
+    _output('trace', { message: `[CRAWL] HTTP request queued: ${req && req.Verb || 'GET'} ${uri}` });
+}
+
 function strFromRawData() {
     let result = '';
     for (let i = 0; i < arguments.length; i++) {
@@ -811,15 +850,19 @@ function makeSiteFile(props) {
         _variations: [],
         _markedFlags: 0,
     }, props || {});
+    if (!sf.fullPath) sf.fullPath = sf.path || '/';
+    if (sf.isFile === undefined) sf.isFile = !sf.fullPath.endsWith('/');
+    if (sf.isDir === undefined) sf.isDir = sf.fullPath.endsWith('/');
     sf.isMarkedAs = function(flag) { return (sf._markedFlags & flag) !== 0; };
     sf.getFirstChild = function() { return sf._children.length > 0 ? sf._children[0] : null; };
-    sf.getNextSibling = function() {
+    sf.getNext = function() {
         if (sf._parent && sf._parent._children) {
             const idx = sf._parent._children.indexOf(sf);
             if (idx >= 0 && idx + 1 < sf._parent._children.length) return sf._parent._children[idx + 1];
         }
         return null;
     };
+    sf.getNextSibling = sf.getNext;
     sf.getFirstVariation = function() { return sf._variations.length > 0 ? sf._variations[0] : null; };
     sf.getScheme = function(i) { return null; };
     return sf;
@@ -856,7 +899,7 @@ module.exports = {
     getSiteRoot, getHTTPWorker,
     getSiteFileWithPath, makeSiteFile, terminate,
     addStoredInjectionEntry, getStoredInjectionList,
-    addHTTPJobToCrawler, addLinkToCrawler, getHostByName, random,
+    addHTTPJobToCrawler, addHTTPRequestToCrawler, addLinkToCrawler, getHostByName, random,
     Plain2SHA1, Plain2MD5, plain2md5, getFileName, getFileExt,
     trace, LogError, sleep,
     getParserData, url2plain, plain2url, b642plain, plain2b64, alert2,

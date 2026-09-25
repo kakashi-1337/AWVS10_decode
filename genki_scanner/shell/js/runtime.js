@@ -47,6 +47,8 @@ function buildSandbox() {
         addStoredInjectionEntry: bridge.addStoredInjectionEntry,
         getStoredInjectionList: bridge.getStoredInjectionList,
         addHTTPJobToCrawler: bridge.addHTTPJobToCrawler,
+        addHTTPRequestToCrawler: bridge.addHTTPRequestToCrawler,
+        THTTPRequest: bridge.THTTPRequest,
         htmlTokens: htmlTokens,
         addLinkToCrawler: bridge.addLinkToCrawler,
         getHostByName: bridge.getHostByName,
