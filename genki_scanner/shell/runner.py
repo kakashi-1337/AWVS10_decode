@@ -19,8 +19,11 @@ import sys
 import time
 import signal
 import socket
+import urllib3
 from pathlib import Path
 from urllib.parse import urlparse, urljoin, parse_qs
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .tech_detect import detect_technologies, WAF_SIGNATURES
 from .site_tree import SiteTree, Scheme, SiteFile
