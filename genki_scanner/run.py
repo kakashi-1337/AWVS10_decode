@@ -79,6 +79,34 @@ Modules: """ + ", ".join(ALL_MODULES.keys()),
     output_group.add_argument("-o", "--output", help="Save results to JSON file")
     output_group.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
+    browser_group = parser.add_argument_group("browser mode")
+    browser_group.add_argument(
+        "--browser", action="store_true",
+        help="Use stealth browser (anti-fingerprint, CF bypass, anti-bot)",
+    )
+    browser_group.add_argument(
+        "--crawl", action="store_true",
+        help="Crawl target with browser before scanning (requires --browser)",
+    )
+    browser_group.add_argument(
+        "--max-depth", type=int, default=3,
+        help="Crawl depth (default: 3)",
+    )
+    browser_group.add_argument(
+        "--max-pages", type=int, default=100,
+        help="Max pages to crawl (default: 100)",
+    )
+    browser_group.add_argument(
+        "--headed", action="store_true",
+        help="Run browser in headed mode (visible window)",
+    )
+    browser_group.add_argument(
+        "--viewport",
+        default="laptop",
+        choices=["desktop_1080", "desktop_1440", "laptop", "macbook", "macbook_pro"],
+        help="Browser viewport profile (default: laptop)",
+    )
+
     curl_group = parser.add_argument_group("curl")
     curl_group.add_argument(
         "--curl-test",
@@ -165,6 +193,24 @@ def main():
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 params[k.strip()] = v.strip()
+
+    if args.browser:
+        from .browser.orchestrator import run_browser_scan
+        browser_config = {
+            "headless": not args.headed,
+            "viewport": args.viewport,
+        }
+        try:
+            run_browser_scan(
+                config, urls, modules,
+                browser_config=browser_config,
+                crawl=args.crawl,
+                max_depth=args.max_depth,
+                max_pages=args.max_pages,
+            )
+        except KeyboardInterrupt:
+            print("\n[!] Browser scan interrupted")
+        return
 
     scanner = GenkiScanner(config)
 
