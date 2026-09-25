@@ -417,9 +417,15 @@ class ShellOrchestrator:
         forms = []
         api_endpoints = set()
 
+        emails_found = set()
         for match in re.finditer(r'<a\s[^>]*href=["\']([^"\'#]+)["\']', html, re.I):
             href = match.group(1)
-            if href.startswith(('javascript:', 'mailto:', 'tel:', 'data:')):
+            if href.startswith('mailto:'):
+                email = href[7:].split('?')[0].strip()
+                if email and '@' in email:
+                    emails_found.add(email)
+                continue
+            if href.startswith(('javascript:', 'tel:', 'data:')):
                 continue
             full_url = urljoin(base_url, href)
             if urlparse(full_url).hostname == parsed_base.hostname:
@@ -474,7 +480,7 @@ class ShellOrchestrator:
             if urlparse(ep).hostname == parsed_base.hostname:
                 api_endpoints.add(ep)
 
-        return links, forms, api_endpoints
+        return links, forms, api_endpoints, emails_found
 
     def _extract_api_from_js(self, js_code, base_url):
         """Extract API endpoints from JavaScript source code (SPA bundles)."""
@@ -539,7 +545,7 @@ class ShellOrchestrator:
             else:
                 cookie_header = server_info.get("response_headers", {}).get("Set-Cookie", "")
 
-            links, forms, api_endpoints = self._extract_from_html(body, target_url)
+            links, forms, api_endpoints, mailto_emails = self._extract_from_html(body, target_url)
 
             parsed_base = urlparse(target_url)
             same_host = [l for l in links if urlparse(l).hostname == parsed_base.hostname]
