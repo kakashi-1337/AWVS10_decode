@@ -42,6 +42,112 @@ PHASE_ORDER = [
 NETWORK_PHASE = ("Network", "network")
 WEBAPPS_PHASE = ("WebApps", "webapps")
 
+# Maps script name prefixes (lowered) to required tech keywords.
+# If a script matches a prefix here but NONE of the keywords appear
+# in the target's detected tech stack, the script is skipped.
+# Scripts with no matching prefix always run (generic checks).
+TECH_FILTER = {
+    # CMS
+    "wordpress": ["wordpress", "wp-"],
+    "drupal": ["drupal"],
+    "joomla": ["joomla"],
+    "magento": ["magento"],
+    "typo3": ["typo3"],
+    "umbraco": ["umbraco"],
+    "dotnetnuke": ["dotnetnuke", "dnn"],
+    "mediawiki": ["mediawiki"],
+    "vbulletin": ["vbulletin"],
+    "movabletype": ["movable type", "movabletype"],
+    "pmwiki": ["pmwiki"],
+    "moinmoin": ["moinmoin"],
+    "ektroncms": ["ektron"],
+    "xcart": ["x-cart", "xcart"],
+    "gallery": ["gallery2", "gallery3"],
+    "plone": ["plone", "zope"],
+    "liferay": ["liferay"],
+    "sharepoint": ["sharepoint"],
+    "mantisbt": ["mantis"],
+    "nagios": ["nagios"],
+    "openx": ["openx", "revive"],
+    "ipb": ["invision", "ipb", "ips community"],
+    "roundcube": ["roundcube"],
+    "horde": ["horde"],
+    "kayakofusion": ["kayako"],
+    "zabbix": ["zabbix"],
+    "symphony": ["symphony cms"],
+    # PHP frameworks
+    "laravel": ["laravel"],
+    "symfony": ["symfony"],
+    "codeigniter": ["codeigniter"],
+    "cakephp": ["cakephp"],
+    "zend": ["zend"],
+    "phpmyadmin": ["phpmyadmin"],
+    "phpliteadmin": ["phpliteadmin"],
+    "phpthumb": ["phpthumb"],
+    "timthumb": ["timthumb"],
+    "php_cgi": ["php"],
+    "phpfpm": ["php"],
+    "php_hash": ["php"],
+    # Java
+    "j2ee": ["java", "tomcat", "jboss", "weblogic", "glassfish", "wildfly", "jetty"],
+    "jboss": ["jboss", "wildfly"],
+    "struts2": ["struts", "java"],
+    "spring": ["spring", "java"],
+    "primefaces": ["primefaces", "jsf", "java"],
+    "oracle_jsf": ["jsf", "java"],
+    "jsp_auth": ["java", "tomcat", "jsp"],
+    "jaas": ["java"],
+    "gwt": ["gwt", "java"],
+    "tomcat": ["tomcat", "java"],
+    "glassfish": ["glassfish", "java"],
+    "jetty": ["jetty", "java"],
+    "weblogic": ["weblogic", "java"],
+    "jenkins": ["jenkins"],
+    "jira": ["jira", "atlassian"],
+    # .NET / IIS
+    "asp_net": ["asp.net", "iis", ".net"],
+    "aspnet": ["asp.net", "iis", ".net"],
+    "iis": ["iis"],
+    "elmah": ["asp.net", ".net"],
+    "ms15-034": ["iis"],
+    "ms12-050": ["sharepoint"],
+    "ajaxcontroltoolkit": ["asp.net", ".net"],
+    # Node.js
+    "nodejs": ["node", "express", "next.js", "nuxt", "koa", "fastify", "hapi"],
+    # Ruby
+    "rails": ["rails", "ruby"],
+    "webrick": ["webrick", "ruby"],
+    # Python
+    "django": ["django", "python"],
+    "flask": ["flask", "python"],
+    "pyramid": ["pyramid", "python"],
+    "tornado": ["tornado", "python"],
+    # Go
+    "golang": ["go", "gin", "echo", "fiber"],
+    # API / Auth (always run - no tech filter needed for these)
+    # Cloud / CI-CD (always run)
+    # Other server tech
+    "coldfusion": ["coldfusion"],
+    "railo": ["railo", "lucee"],
+    "lotus": ["lotus", "domino"],
+    "ibm_wcm": ["ibm", "websphere"],
+    "ibm_websphere": ["ibm", "websphere"],
+    "hadoop": ["hadoop"],
+    "elasticsearch": ["elasticsearch"],
+    "mongodb": ["mongodb"],
+    "nginx": ["nginx"],
+    "apache": ["apache"],
+    "lighttpd": ["lighttpd"],
+    "frontpage": ["frontpage"],
+    "parallels": ["plesk"],
+    "plesk": ["plesk"],
+    "citrix": ["citrix"],
+    "vmware": ["vmware"],
+    "barracuda": ["barracuda"],
+    "log4shell": ["java", "log4j"],
+    "spring4shell": ["spring", "java"],
+}
+
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
     993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 6379,
@@ -322,16 +428,50 @@ class ShellOrchestrator:
         self.site_trees = {}
         self.soft404 = None
         self.oob_domain = self.config.get("oob_domain", OOB_DOMAIN)
+        self._detected_techs = set()
 
-    def _list_scripts(self, phase_dir):
+    def _build_tech_set(self, server_info):
+        """Build a lowercase set of all detected technologies for filtering."""
+        techs = set()
+        for key in ("technologies", "cms", "frameworks", "js_frameworks", "waf", "cdn"):
+            for t in server_info.get(key, []):
+                techs.add(t.lower())
+        for key in ("banner", "poweredby"):
+            val = server_info.get(key, "")
+            if val:
+                techs.add(val.lower())
+        body = server_info.get("_body", "")
+        if body:
+            bl = body.lower()
+            for probe in ["php", "asp.net", "java", "ruby", "python", "node"]:
+                if probe in bl:
+                    techs.add(probe)
+        self._detected_techs = techs
+        return techs
+
+    def _script_matches_tech(self, script_name):
+        """Check if a script is relevant to detected tech stack."""
+        name_lower = script_name.lower().replace(".script", "")
+        for prefix, keywords in TECH_FILTER.items():
+            if name_lower.startswith(prefix):
+                return any(kw in t for kw in keywords for t in self._detected_techs)
+        return True
+
+    def _list_scripts(self, phase_dir, filter_tech=False):
         full_path = os.path.join(self.scripts_dir, phase_dir)
         if not os.path.isdir(full_path):
             return []
         scripts = []
+        skipped = 0
         for f in sorted(os.listdir(full_path)):
             if f.endswith(".script"):
+                if filter_tech and self._detected_techs and not self._script_matches_tech(f):
+                    skipped += 1
+                    continue
                 scripts.append(os.path.join(full_path, f))
-        return scripts
+        if skipped and self.config.get("verbose"):
+            print(f"    [FILTER] Skipped {skipped} scripts (not applicable to detected stack)")
+        return scripts, skipped
 
     # ---- Technology / Server Detection ----
 
@@ -806,6 +946,11 @@ class ShellOrchestrator:
         if server_info.get("js_frameworks"):
             print(f"  JS Frameworks: {', '.join(server_info['js_frameworks'])}")
 
+        # Build tech filter set from detected stack
+        tech_set = self._build_tech_set(server_info)
+        if tech_set:
+            print(f"  [FILTER] Script filter active: {', '.join(sorted(tech_set)[:10])}")
+
         # Phase 0.3: Soft 404 Calibration
         print("\n  [SOFT404] Calibrating custom error page detection")
         self.soft404 = Soft404Detector(
@@ -875,11 +1020,14 @@ class ShellOrchestrator:
     # ---- Phase Execution (per-item iteration) ----
 
     def _run_phase(self, phase_name, phase_type, target_url, server_info, site_tree=None):
-        scripts = self._list_scripts(phase_name)
+        do_filter = phase_type in ("webapps", "postcrawl", "server")
+        scripts, skipped = self._list_scripts(phase_name, filter_tech=do_filter)
         if not scripts:
+            if skipped:
+                print(f"\n  [{phase_name.upper()}] All {skipped} scripts skipped (not applicable to stack)")
             return
 
-        self.stats["phases"][phase_name] = {"total": len(scripts), "run": 0, "findings": 0}
+        self.stats["phases"][phase_name] = {"total": len(scripts), "run": 0, "findings": 0, "skipped": skipped}
 
         if phase_type in ("server", "postscan", "webapps"):
             self._run_phase_single(phase_name, scripts, target_url, server_info, site_tree)
@@ -1112,7 +1260,9 @@ class ShellOrchestrator:
 
         print(f"\nPhase breakdown:")
         for phase, stats in self.stats["phases"].items():
-            print(f"  {phase}: {stats['run']}/{stats['total']} scripts, {stats['findings']} findings")
+            skipped = stats.get('skipped', 0)
+            skip_str = f", {skipped} skipped" if skipped else ""
+            print(f"  {phase}: {stats['run']}/{stats['total']} scripts, {stats['findings']} findings{skip_str}")
 
         print(f"{'=' * 60}\n")
 

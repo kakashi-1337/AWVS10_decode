@@ -1,0 +1,491 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+function isNodeTarget() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return false;
+    var body = job.response.body;
+    var headers = job.response;
+
+    if (headers.headerValue("x-powered-by").indexOf("Express") != -1) return true;
+    if (headers.headerValue("server").toLowerCase().indexOf("node") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Next.js") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Nuxt") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Koa") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Fastify") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Hapi") != -1) return true;
+    if (body.indexOf("__NEXT_DATA__") != -1) return true;
+    if (body.indexOf("__NUXT__") != -1) return true;
+    if (body.indexOf("/_next/") != -1) return true;
+
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/nonexistent_genki_" + Math.random().toString(36).substring(7);
+    job2.execute();
+    if (!job2.wasError) {
+        var errBody = job2.response.body;
+        if (errBody.indexOf("Cannot GET") != -1 || errBody.indexOf("Not Found") != -1 && errBody.indexOf("Express") != -1) return true;
+        if (errBody.indexOf("ENOENT") != -1 || errBody.indexOf("MODULE_NOT_FOUND") != -1) return true;
+    }
+    return false;
+}
+
+function testExpressDebugInfo() {
+    var paths = [
+        { path: "/debug", name: "Debug endpoint" },
+        { path: "/__express_debug", name: "Express debug" },
+        { path: "/health", name: "Health check" },
+        { path: "/healthcheck", name: "Health check" },
+        { path: "/api/health", name: "API health" },
+        { path: "/status", name: "Status endpoint" },
+        { path: "/_monitor", name: "Monitor endpoint" },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var hasDebugInfo = false;
+            var markers = [];
+
+            if (body.indexOf("uptime") != -1 && body.indexOf("memory") != -1) { hasDebugInfo = true; markers.push("system info"); }
+            if (body.indexOf("env") != -1 && (body.indexOf("NODE_ENV") != -1 || body.indexOf("production") != -1 || body.indexOf("development") != -1)) { hasDebugInfo = true; markers.push("environment"); }
+            if (body.indexOf("version") != -1 && body.indexOf("node") != -1) { hasDebugInfo = true; markers.push("version"); }
+            if (body.indexOf("pid") != -1 && body.indexOf("cpu") != -1) { hasDebugInfo = true; markers.push("process info"); }
+            if (body.indexOf("database") != -1 && (body.indexOf("connected") != -1 || body.indexOf("host") != -1)) { hasDebugInfo = true; markers.push("database info"); }
+
+            if (hasDebugInfo) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "Node.js Debug Information Disclosure (" + paths[i].name + ")";
+                ri.severity = 2;
+                ri.setHttpInfo(job);
+                ri.details = "Endpoint [bold]" + paths[i].path + "[/bold] exposes internal info: " + markers.join(", ");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testExpressStackTrace() {
+    var payloads = [
+        { path: "/%c0%ae%c0%ae", desc: "malformed UTF-8" },
+        { path: "/api/v1/../../../etc/passwd", desc: "path traversal" },
+        { path: "/?__proto__[test]=1", desc: "prototype pollution probe" },
+        { path: "/api?callback=<script>", desc: "JSONP injection" },
+    ];
+
+    for (var i = 0; i < payloads.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = payloads[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 >= 400) {
+            var body = job.response.body;
+            if ((body.indexOf("at ") != -1 && body.indexOf(".js:") != -1) ||
+                (body.indexOf("Error:") != -1 && body.indexOf("node_modules") != -1) ||
+                (body.indexOf("Stack:") != -1 || body.indexOf("stack\":") != -1)) {
+
+                var hasRealTrace = body.indexOf("/node_modules/") != -1 ||
+                                   body.indexOf("at Module") != -1 ||
+                                   body.indexOf("at Object.") != -1 ||
+                                   body.indexOf("internal/") != -1;
+
+                if (hasRealTrace) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = payloads[i].path;
+                    ri.alertPath = "Scripts/NodeJS";
+                    ri.name = "Node.js Stack Trace Disclosure";
+                    ri.severity = 2;
+                    ri.setHttpInfo(job);
+                    ri.details = "Stack trace leaked via " + payloads[i].desc + ".[break]" +
+                        "Reveals internal file paths, module versions, and application structure.";
+                    AddReportItem(ri);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+function testEnvExposure() {
+    var envPaths = [
+        "/.env",
+        "/.env.local",
+        "/.env.development",
+        "/.env.production",
+        "/env.json",
+        "/config.json",
+        "/config/default.json",
+        "/config/production.json",
+        "/config/local.json",
+    ];
+
+    for (var i = 0; i < envPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = envPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isEnv = false;
+            var envType = "";
+
+            if (envPaths[i].indexOf(".env") != -1) {
+                var hasKey = body.indexOf("=") != -1;
+                var hasSecretKeyword = body.indexOf("SECRET") != -1 || body.indexOf("KEY") != -1 ||
+                    body.indexOf("PASSWORD") != -1 || body.indexOf("TOKEN") != -1 ||
+                    body.indexOf("DB_") != -1 || body.indexOf("API_") != -1 ||
+                    body.indexOf("MONGO") != -1 || body.indexOf("REDIS") != -1;
+                if (hasKey && hasSecretKeyword) { isEnv = true; envType = "dotenv"; }
+            } else {
+                try {
+                    if (body.charAt(0) == '{') {
+                        var hasDbConfig = body.indexOf("host") != -1 && (body.indexOf("port") != -1 || body.indexOf("database") != -1);
+                        var hasSecrets = body.indexOf("secret") != -1 || body.indexOf("password") != -1 ||
+                            body.indexOf("apiKey") != -1 || body.indexOf("token") != -1;
+                        if (hasDbConfig || hasSecrets) { isEnv = true; envType = "config JSON"; }
+                    }
+                } catch(e) {}
+            }
+
+            if (isEnv) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = envPaths[i];
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "Node.js Configuration/Secrets Exposure (" + envType + ")";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Sensitive configuration exposed at [bold]" + envPaths[i] + "[/bold].[break]" +
+                    "May contain database credentials, API keys, JWT secrets.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testSourceMaps() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+    var body = job.response.body;
+
+    var mapFiles = [];
+    var regex = /["\']([^"\']+\.js\.map)["\']|sourceMappingURL=([^\s\*]+\.map)/g;
+    var match;
+    while ((match = body.match(/sourceMappingURL=([^\s\*"']+)/)) != null) {
+        mapFiles.push(match[1]);
+        body = body.substring(body.indexOf(match[0]) + match[0].length);
+        if (mapFiles.length > 5) break;
+    }
+
+    var jsRegex = /(?:src|href)=["']([^"']+\.(?:js|mjs))["']/g;
+    var jsFiles = [];
+    var bodySearch = job.response.body;
+    var jsMatch;
+    while ((jsMatch = bodySearch.match(/(?:src|href)=["']([^"']+\.(?:js|mjs))["']/)) != null) {
+        jsFiles.push(jsMatch[1]);
+        bodySearch = bodySearch.substring(bodySearch.indexOf(jsMatch[0]) + jsMatch[0].length);
+        if (jsFiles.length > 5) break;
+    }
+
+    for (var i = 0; i < jsFiles.length; i++) {
+        mapFiles.push(jsFiles[i] + ".map");
+    }
+
+    for (var i = 0; i < mapFiles.length; i++) {
+        var mapPath = mapFiles[i];
+        if (mapPath.indexOf("http") == 0) continue;
+
+        var job2 = new THTTPJob();
+        job2.url = targetUrl;
+        job2.URI = mapPath.charAt(0) == '/' ? mapPath : '/' + mapPath;
+        job2.execute();
+
+        if (!job2.wasError && job2.response.msg2 == 200) {
+            var mapBody = job2.response.body;
+            if (mapBody.indexOf("\"sources\"") != -1 && mapBody.indexOf("\"mappings\"") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = job2.URI;
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "JavaScript Source Map Exposed";
+                ri.severity = 2;
+                ri.setHttpInfo(job2);
+                ri.details = "Source map file accessible: [bold]" + job2.URI + "[/bold].[break]" +
+                    "Reveals original source code, file structure, and implementation details.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testNextJsVulns() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+    if (job.response.body.indexOf("__NEXT_DATA__") == -1 && job.response.body.indexOf("/_next/") == -1) return;
+
+    // CVE-2024-34351 - Next.js SSRF via Host header in Server Actions
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/";
+    job2.verb = "POST";
+    job2.request.addHeader("Next-Action", "test");
+    job2.request.addHeader("Content-Type", "text/plain;charset=utf-8");
+    job2.postData = "[]";
+    job2.execute();
+
+    if (!job2.wasError) {
+        var body2 = job2.response.body;
+        if (job2.response.msg2 != 404 && job2.response.msg2 != 405) {
+            if (body2.indexOf("action") != -1 || job2.response.headerValue("x-action-redirect") != "" ||
+                job2.response.headerValue("x-action-revalidated") != "") {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = "/";
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "Next.js Server Actions Endpoint Detected";
+                ri.severity = 1;
+                ri.setHttpInfo(job2);
+                ri.details = "Next.js Server Actions respond to POST requests with Next-Action header.[break]" +
+                    "Check for CVE-2024-34351 (SSRF via Host header manipulation) on versions < 14.1.1.";
+                AddReportItem(ri);
+            }
+        }
+    }
+
+    // CVE-2025-29927 - Next.js middleware auth bypass via x-middleware-subrequest
+    var authPaths = ["/admin", "/dashboard", "/api/admin", "/api/users", "/settings", "/account"];
+    for (var i = 0; i < authPaths.length; i++) {
+        var jobNorm = new THTTPJob();
+        jobNorm.url = targetUrl;
+        jobNorm.URI = authPaths[i];
+        jobNorm.execute();
+        if (jobNorm.wasError) continue;
+
+        if (jobNorm.response.msg2 == 307 || jobNorm.response.msg2 == 302 || jobNorm.response.msg2 == 401 || jobNorm.response.msg2 == 403) {
+            var jobBypass = new THTTPJob();
+            jobBypass.url = targetUrl;
+            jobBypass.URI = authPaths[i];
+            jobBypass.request.addHeader("x-middleware-subrequest", "middleware:middleware:middleware:middleware:middleware");
+            jobBypass.execute();
+
+            if (!jobBypass.wasError && jobBypass.response.msg2 == 200) {
+                var bypassBody = jobBypass.response.body;
+                var normBody = jobNorm.response.body;
+                if (bypassBody.length > 100 && bypassBody != normBody) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = authPaths[i];
+                    ri.alertPath = "Scripts/NodeJS";
+                    ri.name = "Next.js Middleware Auth Bypass (CVE-2025-29927)";
+                    ri.severity = 4;
+                    ri.setHttpInfo(jobBypass);
+                    ri.details = "Authentication bypassed via x-middleware-subrequest header.[break]" +
+                        "Normal request: " + jobNorm.response.msg2 + ", Bypass request: " + jobBypass.response.msg2 + ".[break]" +
+                        "Affects Next.js < 15.2.3, < 14.2.25, < 13.5.9.";
+                    AddReportItem(ri);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Next.js _next/data route leak
+    var job3 = new THTTPJob();
+    job3.url = targetUrl;
+    job3.URI = "/_next/data/";
+    job3.execute();
+    if (!job3.wasError && job3.response.msg2 != 404) {
+        var body3 = job3.response.body;
+        if (body3.indexOf("buildId") != -1 || body3.indexOf("pageProps") != -1 || body3.length > 50) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/_next/data/";
+            ri.alertPath = "Scripts/NodeJS";
+            ri.name = "Next.js Data Routes Accessible";
+            ri.severity = 1;
+            ri.setHttpInfo(job3);
+            ri.details = "Next.js _next/data routes expose server-side props and build info.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testExpressAPISecurity() {
+    var apiPaths = ["/api", "/api/v1", "/api/v2", "/graphql", "/api/graphql"];
+
+    for (var i = 0; i < apiPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = apiPaths[i];
+        job.execute();
+        if (job.wasError || job.response.msg2 == 404) continue;
+
+        var body = job.response.body;
+
+        // GraphQL introspection
+        if (apiPaths[i].indexOf("graphql") != -1 || body.indexOf("graphql") != -1) {
+            var gqlJob = new THTTPJob();
+            gqlJob.url = targetUrl;
+            gqlJob.URI = apiPaths[i];
+            gqlJob.verb = "POST";
+            gqlJob.request.addHeader("Content-Type", "application/json");
+            gqlJob.postData = '{"query":"{__schema{types{name}}}"}';
+            gqlJob.execute();
+
+            if (!gqlJob.wasError && gqlJob.response.msg2 == 200) {
+                var gqlBody = gqlJob.response.body;
+                if (gqlBody.indexOf("__schema") != -1 && gqlBody.indexOf("types") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = apiPaths[i];
+                    ri.alertPath = "Scripts/NodeJS";
+                    ri.name = "GraphQL Introspection Enabled";
+                    ri.severity = 2;
+                    ri.setHttpInfo(gqlJob);
+                    ri.details = "GraphQL schema fully queryable via introspection.[break]" +
+                        "Reveals all types, queries, mutations, and internal data model.";
+                    AddReportItem(ri);
+                }
+            }
+        }
+
+        // CORS misconfiguration
+        var corsJob = new THTTPJob();
+        corsJob.url = targetUrl;
+        corsJob.URI = apiPaths[i];
+        corsJob.request.addHeader("Origin", "https://evil.com");
+        corsJob.execute();
+
+        if (!corsJob.wasError) {
+            var acao = corsJob.response.headerValue("access-control-allow-origin");
+            var acac = corsJob.response.headerValue("access-control-allow-credentials");
+            if (acao == "https://evil.com" && acac.toLowerCase() == "true") {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = apiPaths[i];
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "CORS Misconfiguration - Origin Reflection with Credentials";
+                ri.severity = 3;
+                ri.setHttpInfo(corsJob);
+                ri.details = "API reflects arbitrary Origin header AND allows credentials.[break]" +
+                    "Attacker can steal authenticated API responses cross-origin.";
+                AddReportItem(ri);
+            } else if (acao == "*" && acac.toLowerCase() == "true") {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = apiPaths[i];
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "CORS Wildcard with Credentials";
+                ri.severity = 3;
+                ri.setHttpInfo(corsJob);
+                ri.details = "API uses Access-Control-Allow-Origin: * with Allow-Credentials: true.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testNodePackageExposure() {
+    var paths = [
+        { path: "/package.json", key: "dependencies", sev: 2 },
+        { path: "/package-lock.json", key: "lockfileVersion", sev: 2 },
+        { path: "/yarn.lock", key: "integrity", sev: 2 },
+        { path: "/npm-debug.log", key: "npm", sev: 3 },
+        { path: "/.npmrc", key: "registry", sev: 3 },
+        { path: "/tsconfig.json", key: "compilerOptions", sev: 1 },
+        { path: "/.babelrc", key: "presets", sev: 1 },
+        { path: "/nest-cli.json", key: "collection", sev: 1 },
+        { path: "/angular.json", key: "projects", sev: 1 },
+        { path: "/next.config.js", key: "module.exports", sev: 1 },
+        { path: "/nuxt.config.js", key: "export default", sev: 1 },
+        { path: "/pm2.json", key: "apps", sev: 2 },
+        { path: "/ecosystem.config.js", key: "apps", sev: 2 },
+        { path: "/Procfile", key: "web:", sev: 1 },
+        { path: "/Dockerfile", key: "FROM", sev: 2 },
+        { path: "/docker-compose.yml", key: "services", sev: 2 },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(paths[i].key) != -1 && body.length > 20) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/NodeJS";
+                ri.name = "Node.js Build/Config File Exposed: " + paths[i].path;
+                ri.severity = paths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "Build/deployment config accessible at [bold]" + paths[i].path + "[/bold].[break]" +
+                    "Reveals dependency versions, internal structure, deployment config.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testExpressSecurityHeaders() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    var missing = [];
+    if (!job.response.headerExists("content-security-policy")) missing.push("Content-Security-Policy");
+    if (!job.response.headerExists("x-content-type-options")) missing.push("X-Content-Type-Options");
+    if (!job.response.headerExists("strict-transport-security")) missing.push("Strict-Transport-Security");
+    if (!job.response.headerExists("x-frame-options") && !job.response.headerValue("content-security-policy").indexOf("frame-ancestors") != -1) missing.push("X-Frame-Options");
+
+    if (job.response.headerValue("x-powered-by") != "") {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = "/";
+        ri.alertPath = "Scripts/NodeJS";
+        ri.name = "X-Powered-By Header Present (Express)";
+        ri.severity = 1;
+        ri.setHttpInfo(job);
+        ri.details = "X-Powered-By: " + job.response.headerValue("x-powered-by") + "[break]" +
+            "Fingerprints the framework. Use helmet.js or app.disable('x-powered-by').";
+        AddReportItem(ri);
+    }
+}
+
+if (isNodeTarget()) {
+    testExpressDebugInfo();
+    testExpressStackTrace();
+    testEnvExposure();
+    testSourceMaps();
+    testNextJsVulns();
+    testExpressAPISecurity();
+    testNodePackageExposure();
+    testExpressSecurityHeaders();
+}
