@@ -886,7 +886,13 @@ function makeSiteFile(props) {
     };
     sf.getNextSibling = sf.getNext;
     sf.getFirstVariation = function() { return sf._variations.length > 0 ? sf._variations[0] : null; };
-    sf.getScheme = function(i) { return null; };
+    sf.hasVariations = sf._variations.length > 0;
+    if (!sf._schemes) sf._schemes = [];
+    sf.schemeCount = sf._schemes.length;
+    sf.getScheme = function(i) {
+        if (i < sf._schemes.length) return sf._schemes[i];
+        return null;
+    };
     return sf;
 }
 
