@@ -37,6 +37,10 @@ function buildSandbox() {
         setGlobalValue: bridge.setGlobalValue,
         getCurrentScheme: bridge.getCurrentScheme,
         getCurrentDirectory: bridge.getCurrentDirectory,
+        getCurrentFile: bridge.getCurrentFile,
+        getNewFiles: bridge.getNewFiles,
+        getCookies: bridge.getCookies,
+        setCookies: bridge.setCookies,
         getServerInfo: bridge.getServerInfo,
         getSiteRoot: bridge.getSiteRoot,
         getHTTPWorker: bridge.getHTTPWorker,
@@ -44,6 +48,10 @@ function buildSandbox() {
         getStoredInjectionList: bridge.getStoredInjectionList,
         addHTTPJobToCrawler: bridge.addHTTPJobToCrawler,
         htmlTokens: htmlTokens,
+        addLinkToCrawler: bridge.addLinkToCrawler,
+        getHostByName: bridge.getHostByName,
+        strFromRawData: bridge.strFromRawData,
+        TSocket: bridge.TSocket,
         random: bridge.random,
         Plain2SHA1: bridge.Plain2SHA1,
         Plain2MD5: bridge.Plain2MD5,
@@ -78,8 +86,13 @@ function buildSandbox() {
 
         // scan context (set per command)
         scanURL: null,
+        ScanURL: null,
+        scanHost: '',
+        ScanHost: '',
         scanIP: '',
+        ScanIP: '',
         oobDomain: '',
+        SetGlobalValue: bridge.setGlobalValue,
     };
 }
 
@@ -87,7 +100,8 @@ function resolveIncludes(code, scriptsDir, visited) {
     visited = visited || new Set();
     const includesDir = path.join(scriptsDir, 'Includes');
 
-    return code.replace(/^#include\s+([^;\s]+)\s*;?\s*$/gm, (match, file) => {
+    return code.replace(/^#include\s+([^;\s]+)\s*;?\s*$/gm, (match, rawFile) => {
+        const file = rawFile.replace(/^["']|["']$/g, '');
         if (visited.has(file)) return `// [already included: ${file}]`;
         visited.add(file);
 
@@ -108,10 +122,17 @@ function resolveRequires(code, scriptsDir) {
     });
 }
 
+function stripPragmas(code) {
+    return code
+        .replace(/^#noretest\s*;?\s*$/gm, '// [pragma: noretest]')
+        .replace(/^#engine\s+[\d.]+\s*;?\s*$/gm, (m) => `// [pragma: ${m.trim()}]`);
+}
+
 function preprocessScript(scriptPath, scriptsDir) {
     if (scriptCache[scriptPath]) return scriptCache[scriptPath];
 
     let code = fs.readFileSync(scriptPath, 'utf-8');
+    code = stripPragmas(code);
     code = resolveIncludes(code, scriptsDir, new Set());
     code = resolveRequires(code, scriptsDir);
 
@@ -128,9 +149,14 @@ function executeScript(scriptPath, scriptsDir, context) {
 
     // set scan context
     if (context.scanURL) {
-        sandbox.scanURL = new bridge.TURL(context.scanURL);
+        const urlObj = new bridge.TURL(context.scanURL);
+        sandbox.scanURL = urlObj;
+        sandbox.ScanURL = urlObj;
+        sandbox.scanHost = urlObj.host || '';
+        sandbox.ScanHost = sandbox.scanHost;
     }
     sandbox.scanIP = context.scanIP || '';
+    sandbox.ScanIP = sandbox.scanIP;
     sandbox.oobDomain = context.oobDomain || '6u.gg';
 
     if (context.scheme) {
@@ -140,6 +166,9 @@ function executeScript(scriptPath, scriptsDir, context) {
     }
     if (context.directory) {
         bridge.SHELL_STATE.currentDirectory = context.directory;
+    }
+    if (context.scanURL) {
+        bridge.SHELL_STATE.scanURL = context.scanURL;
     }
     if (context.serverInfo) {
         bridge.SHELL_STATE.serverInfo = context.serverInfo;

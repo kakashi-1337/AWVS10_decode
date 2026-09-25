@@ -96,6 +96,7 @@ class THTTPJob {
         this._body = '';
         this.response = new THTTPResponse();
         this.request = new THTTPRequest(this);
+        this.Request = this.request;
         this.wasError = false;
         this.notFound = false;
         this.responseDuration = 0;
@@ -103,11 +104,25 @@ class THTTPJob {
         this.errorCode = 0;
         this.secure = false;
         this.hasAspectData = false;
+        this.addCookies = true;
+        this.retries = 3;
+        this.autoHostHeader = true;
+        this._host = '';
         this._postData = '';
     }
 
     set postData(v) { this._body = v; this._postData = v; }
     get postData() { return this._postData; }
+
+    get uri() { return this.URI; }
+    set uri(v) { this.URI = v; }
+
+    get host() {
+        if (this._host) return this._host;
+        if (this.url && typeof this.url === 'object' && this.url.host) return this.url.host;
+        return '';
+    }
+    set host(v) { this._host = v; }
 
     _buildUrl() {
         let base = '';
@@ -274,6 +289,7 @@ class TURL {
         if (this._parsed && this._parsed.port) return parseInt(this._parsed.port);
         return this.scheme === 'https' ? 443 : 80;
     }
+    get Port() { return this._parsed && this._parsed.port ? this._parsed.port : ''; }
     get host() { return this._parsed ? this._parsed.hostname : ''; }
 
     toString() { return this.url; }
@@ -372,8 +388,12 @@ const SHELL_STATE = {
     siteTree: null,
     currentScheme: null,
     currentDirectory: null,
+    currentFile: null,
+    scanURL: '',
     serverInfo: {},
     storedInjections: {},
+    discoveredFiles: null,
+    cookies: '',
 };
 
 // ---- Global Functions (matching AWVS engine) ----
@@ -418,11 +438,45 @@ function getCurrentScheme() {
 }
 
 function getCurrentDirectory() {
-    return SHELL_STATE.currentDirectory;
+    return SHELL_STATE.currentDirectory || { path: '/', Name: '', name: '' };
+}
+
+function getCurrentFile() {
+    if (SHELL_STATE.currentFile) return SHELL_STATE.currentFile;
+    const url = SHELL_STATE.scanURL || '';
+    let filePath = '/';
+    let fileName = '';
+    try {
+        const u = new URL(url);
+        filePath = u.pathname;
+        const parts = filePath.split('/');
+        fileName = parts[parts.length - 1] || '';
+    } catch {}
+    return {
+        name: fileName,
+        path: filePath.substring(0, filePath.lastIndexOf('/') + 1) || '/',
+        fullPath: filePath,
+        isFile: !!fileName && fileName.includes('.'),
+        isDir: !fileName || !fileName.includes('.'),
+        response: new THTTPResponse(),
+        url: url,
+    };
 }
 
 function getServerInfo() {
     const si = SHELL_STATE.serverInfo || {};
+    const varMap = {
+        '${Platform_OS}': 'platform_os',
+        '${WebServerBanner}': 'banner',
+        '${WebServer}': 'banner',
+        '${X-Powered-By}': 'poweredby',
+        '${ResponsiveServer}': 'banner',
+    };
+    function resolveVar(variable) {
+        const mapped = varMap[variable];
+        if (mapped) return si[mapped] || '';
+        return si[variable] || '';
+    }
     if (typeof si.hasTechnology !== 'function') {
         si.hasTechnology = function(name) {
             const techs = si.technologies || [];
@@ -436,18 +490,47 @@ function getServerInfo() {
             return false;
         };
         si.match = function(variable, value) {
-            const v = si[variable] || '';
+            const v = resolveVar(variable);
             return v.toLowerCase().includes(value.toLowerCase());
         };
         si.getValue = function(variable) {
-            return si[variable] || '';
+            return resolveVar(variable);
         };
     }
     return si;
 }
 
 function getSiteRoot(flags) {
-    return SHELL_STATE.siteTree;
+    if (SHELL_STATE.siteTree) return SHELL_STATE.siteTree;
+    return { path: '/', Name: '', name: '', isDir: true, isFile: false, children: [] };
+}
+
+function getNewFiles() {
+    return SHELL_STATE.discoveredFiles || new TList();
+}
+
+function getCookies() {
+    return SHELL_STATE.cookies || '';
+}
+
+function setCookies(cookies) {
+    SHELL_STATE.cookies = cookies;
+}
+
+function getHostByName(hostname) {
+    try {
+        const result = spawnSync('getent', ['hosts', hostname], { encoding: 'utf-8', timeout: 5000 });
+        if (result.stdout) {
+            const ip = result.stdout.trim().split(/\s+/)[0];
+            if (ip) return ip;
+        }
+        const dig = spawnSync('dig', ['+short', hostname], { encoding: 'utf-8', timeout: 5000 });
+        if (dig.stdout) {
+            const ip = dig.stdout.trim().split('\n')[0];
+            if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
+        }
+    } catch {}
+    return '';
 }
 
 function getHTTPWorker() {
@@ -510,7 +593,47 @@ function sleep(ms) {
 }
 
 function getParserData(body, contentType) {
-    return { body: body || '', contentType: contentType || '' };
+    const pd = { body: body || '', contentType: contentType || '' };
+    pd.getForms = function() {
+        const forms = [];
+        const html = pd.body;
+        const re = /<form[\s>]/gi;
+        let m;
+        while ((m = re.exec(html)) !== null) {
+            const formStart = m.index;
+            const endTag = html.indexOf('</form>', formStart);
+            const formHtml = endTag !== -1 ? html.substring(formStart, endTag + 7) : html.substring(formStart);
+            const actionMatch = formHtml.match(/action=["']([^"']*)/i);
+            const methodMatch = formHtml.match(/method=["']([^"']*)/i);
+            const form = {
+                action: actionMatch ? actionMatch[1] : '',
+                method: methodMatch ? methodMatch[1] : 'GET',
+                html: formHtml,
+                inputs: [],
+            };
+            const inputRe = /<input[^>]*>/gi;
+            let im;
+            while ((im = inputRe.exec(formHtml)) !== null) {
+                const nameMatch = im[0].match(/name=["']([^"']*)/i);
+                const typeMatch = im[0].match(/type=["']([^"']*)/i);
+                const valMatch = im[0].match(/value=["']([^"']*)/i);
+                if (nameMatch) {
+                    form.inputs.push({
+                        name: nameMatch[1],
+                        type: typeMatch ? typeMatch[1] : 'text',
+                        value: valMatch ? valMatch[1] : '',
+                    });
+                }
+            }
+            forms.push(form);
+        }
+        const list = new TList();
+        for (const f of forms) list.add(f);
+        return list;
+    };
+    pd.getLinks = function() { return new TList(); };
+    pd.getComments = function() { return new TList(); };
+    return pd;
 }
 
 function url2plain(encoded) {
@@ -535,6 +658,57 @@ function plain2md5(str) {
 
 function alert2(msg) {
     _output('trace', { message: `[ALERT] ${msg}` });
+}
+
+// ---- TSocket (TCP socket stub) ----
+class TSocket {
+    constructor() {
+        this.host = '';
+        this.port = 0;
+        this.timeout = 10000;
+        this.connected = false;
+        this._buffer = '';
+    }
+    Connect(host, port) {
+        if (host) this.host = host;
+        if (port) this.port = port;
+        try {
+            const net = require('net');
+            const sock = new net.Socket();
+            sock.setTimeout(this.timeout);
+            const result = spawnSync('node', ['-e', `
+                const net = require('net');
+                const s = net.createConnection(${port}, '${host.replace(/'/g, '')}');
+                s.setTimeout(${this.timeout});
+                s.on('connect', () => { process.stdout.write('OK'); s.destroy(); });
+                s.on('error', () => { process.stdout.write('ERR'); });
+                s.on('timeout', () => { process.stdout.write('ERR'); s.destroy(); });
+            `], { timeout: this.timeout + 2000, encoding: 'utf-8' });
+            this.connected = (result.stdout || '').includes('OK');
+        } catch {
+            this.connected = false;
+        }
+        return this.connected;
+    }
+    connect(host, port) { return this.Connect(host, port); }
+    Send(data) { this._buffer = data; return data.length; }
+    send(data) { return this.Send(data); }
+    Recv(maxLen) { return ''; }
+    recv(maxLen) { return ''; }
+    Close() { this.connected = false; }
+    close() { this.connected = false; }
+}
+
+function addLinkToCrawler(uri, root) {
+    _output('trace', { message: `[CRAWL] Discovered link: ${uri}` });
+}
+
+function strFromRawData() {
+    let result = '';
+    for (let i = 0; i < arguments.length; i++) {
+        result += String.fromCharCode(arguments[i] & 0xFF);
+    }
+    return result;
 }
 
 // ---- THTTPWorker (batch execution) ----
@@ -565,17 +739,18 @@ function _output(type, data) {
 }
 
 module.exports = {
-    THTTPJob, THTTPResponse, THTTPRequest, TURL,
+    THTTPJob, THTTPResponse, THTTPRequest, TURL, TSocket,
     TReportItem, TKBaseItem, TList, TStringList,
     THTTPWorker, SHELL_CONFIG, SHELL_STATE,
     AddReportItem, AddKBItem, ScriptProgress,
     getGlobalValue, setGlobalValue,
-    getCurrentScheme, getCurrentDirectory, getServerInfo,
+    getCurrentScheme, getCurrentDirectory, getCurrentFile, getServerInfo, getNewFiles, getCookies, setCookies,
     getSiteRoot, getHTTPWorker,
     addStoredInjectionEntry, getStoredInjectionList,
-    addHTTPJobToCrawler, random,
+    addHTTPJobToCrawler, addLinkToCrawler, getHostByName, random,
     Plain2SHA1, Plain2MD5, plain2md5, getFileName, getFileExt,
     trace, LogError, sleep,
     getParserData, url2plain, plain2url, b642plain, plain2b64, alert2,
+    strFromRawData,
     _output,
 };
