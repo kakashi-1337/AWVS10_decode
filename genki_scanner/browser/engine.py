@@ -3,7 +3,9 @@ Browser engine - stealth Chromium with anti-fingerprint and CF bypass.
 Wraps Playwright with human-like behavior simulation.
 """
 import asyncio
+import os
 import random
+import shutil
 import time
 from urllib.parse import urlparse
 
@@ -27,6 +29,43 @@ class BrowserEngine:
         self._browser = None
         self._context = None
         self.request_count = 0
+
+    @staticmethod
+    def _find_chromium():
+        """Auto-detect Playwright's installed Chromium path across OS."""
+        # Check PLAYWRIGHT_BROWSERS_PATH env (used in CI/containers)
+        env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        if env_path:
+            for root, dirs, files in os.walk(env_path):
+                for name in ("chrome", "chrome.exe", "chromium"):
+                    full = os.path.join(root, name)
+                    if os.path.isfile(full) and os.access(full, os.X_OK):
+                        return full
+
+        # Default Playwright cache locations per OS
+        home = os.path.expanduser("~")
+        candidates = [
+            os.path.join(home, ".cache", "ms-playwright"),          # Linux
+            os.path.join(home, "AppData", "Local", "ms-playwright"), # Windows
+            os.path.join(home, "Library", "Caches", "ms-playwright"), # macOS
+            "/opt/pw-browsers",                                      # Container
+        ]
+        for base in candidates:
+            if not os.path.isdir(base):
+                continue
+            for root, dirs, files in os.walk(base):
+                for name in ("chrome", "chrome.exe", "chromium"):
+                    full = os.path.join(root, name)
+                    if os.path.isfile(full) and os.access(full, os.X_OK):
+                        return full
+
+        # Fallback: system chromium/chrome
+        for name in ("chromium-browser", "chromium", "google-chrome", "chrome"):
+            found = shutil.which(name)
+            if found:
+                return found
+
+        return None
 
     async def start(self):
         self._playwright = await async_playwright().start()
@@ -58,12 +97,11 @@ class BrowserEngine:
         if self.proxy:
             proxy_settings = {"server": self.proxy}
 
-        self._browser = await self._playwright.chromium.launch(
-            executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
-            args=launch_args,
-            proxy=proxy_settings,
-            headless=False,
-        )
+        chrome_path = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH") or self._find_chromium()
+        launch_kwargs = dict(args=launch_args, proxy=proxy_settings, headless=False)
+        if chrome_path:
+            launch_kwargs["executable_path"] = chrome_path
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
 
         self._context = await self._browser.new_context(
             viewport=vp,
