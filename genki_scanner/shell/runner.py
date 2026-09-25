@@ -69,6 +69,8 @@ class NodeRuntime:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            encoding="utf-8",
+            errors="replace",
         )
 
         boot = self._read_message()
