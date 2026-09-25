@@ -19,6 +19,34 @@ from .core.config import ScanConfig
 from .core.scanner import GenkiScanner, ALL_MODULES
 
 
+def _build_shell_argv(args):
+    """Reconstruct sys.argv for the shell CLI from the main parser's args."""
+    argv = ["genki-shell"]
+    if args.url:
+        argv.extend(["-u", args.url])
+    if hasattr(args, "file") and args.file:
+        argv.extend(["-f", args.file])
+    if args.phase:
+        argv.extend(["--phase", args.phase])
+    if hasattr(args, "script") and args.script:
+        argv.extend(["--script", args.script])
+    if hasattr(args, "scripts_dir") and args.scripts_dir:
+        argv.extend(["--scripts-dir", args.scripts_dir])
+    if hasattr(args, "list_scripts") and args.list_scripts:
+        argv.extend(["--list-scripts", args.list_scripts])
+    if hasattr(args, "delay") and args.delay != 1.0:
+        argv.extend(["--delay", str(args.delay)])
+    if hasattr(args, "timeout") and args.timeout != 15:
+        argv.extend(["--timeout", str(args.timeout)])
+    if hasattr(args, "proxy") and args.proxy:
+        argv.extend(["--proxy", args.proxy])
+    if hasattr(args, "output") and args.output:
+        argv.extend(["-o", args.output])
+    if hasattr(args, "verbose") and args.verbose:
+        argv.append("-v")
+    return argv
+
+
 def banner():
     print(r"""
    ___            _    _   ___
@@ -107,6 +135,29 @@ Modules: """ + ", ".join(ALL_MODULES.keys()),
         help="Browser viewport profile (default: laptop)",
     )
 
+    shell_group = parser.add_argument_group("shell mode (AWVS10 scripts)")
+    shell_group.add_argument(
+        "--shell", action="store_true",
+        help="Run AWVS10 decoded scripts via the shell runtime",
+    )
+    shell_group.add_argument(
+        "--phase",
+        help="Shell mode: phases to run (comma-separated: PerServer,PerScheme,...)",
+    )
+    shell_group.add_argument(
+        "--script",
+        help="Shell mode: run a single specific script",
+    )
+    shell_group.add_argument(
+        "--scripts-dir",
+        help="Shell mode: path to AWVS10 Scripts directory",
+    )
+    shell_group.add_argument(
+        "--list-scripts",
+        metavar="PHASE",
+        help="Shell mode: list scripts in a phase and exit",
+    )
+
     curl_group = parser.add_argument_group("curl")
     curl_group.add_argument(
         "--curl-test",
@@ -119,6 +170,12 @@ Modules: """ + ", ".join(ALL_MODULES.keys()),
 def main():
     banner()
     args = parse_args()
+
+    if args.shell or args.list_scripts:
+        from .shell.cli import main as shell_main
+        sys.argv = _build_shell_argv(args)
+        shell_main()
+        return
 
     if args.curl_test:
         import subprocess
