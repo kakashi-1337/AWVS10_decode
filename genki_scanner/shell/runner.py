@@ -11,6 +11,7 @@ Phase data wiring:
   PostCrawl  - runs each script once with full file list via getNewFiles()
   PostScan   - runs each script once at the end
 """
+import hashlib
 import json
 import os
 import re
@@ -216,6 +217,98 @@ class NodeRuntime:
             print(f"  [TRACE] {msg['data'].get('message', '')}")
 
 
+SOFT_404_KEYWORDS = [
+    "not found", "page not found", "404", "doesn't exist", "does not exist",
+    "no longer available", "we couldn't find", "we could not find",
+    "nothing here", "page you requested", "this page isn't available",
+    "requested url was not found", "the page you are looking for",
+    "oops", "sorry", "error page", "page introuvable",
+]
+
+
+class Soft404Detector:
+    """Detects custom error pages that return HTTP 200 instead of 404."""
+
+    def __init__(self, target_url, headers=None, delay=1.0):
+        self._target = target_url.rstrip('/')
+        self._headers = headers or {}
+        self._delay = delay
+        self._fingerprints = []
+        self._calibrated = False
+
+    def calibrate(self):
+        import requests
+        probes = [
+            f"/genki_404_probe_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}/",
+            f"/this-page-definitely-does-not-exist-{int(time.time())}.html",
+            f"/genki_nonexistent_{os.urandom(4).hex()}.aspx",
+        ]
+        for probe_path in probes:
+            try:
+                resp = requests.get(
+                    self._target + probe_path,
+                    timeout=8, verify=False, allow_redirects=True,
+                    headers=self._headers,
+                )
+                if resp.status_code == 200:
+                    body = resp.text
+                    self._fingerprints.append({
+                        'length': len(body),
+                        'hash': hashlib.sha256(self._normalize_body(body).encode()).hexdigest(),
+                        'title': self._extract_title(body),
+                    })
+                time.sleep(self._delay * 0.3)
+            except Exception:
+                pass
+        self._calibrated = True
+
+    def is_soft_404(self, status, body, url=''):
+        if status != 200:
+            return False
+
+        body_lower = body.lower()
+        title = self._extract_title(body)
+        title_lower = title.lower()
+
+        keyword_hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in body_lower)
+        title_match = any(kw in title_lower for kw in ["not found", "404", "error", "oops"])
+        body_hash = hashlib.sha256(self._normalize_body(body).encode()).hexdigest()
+
+        fp_match = False
+        if self._fingerprints:
+            for fp in self._fingerprints:
+                if body_hash == fp['hash']:
+                    fp_match = True
+                    break
+                if fp['length'] > 100 and abs(len(body) - fp['length']) < max(50, fp['length'] * 0.05):
+                    fp_match = True
+                    break
+
+        if fp_match and keyword_hits >= 1:
+            return True
+        if keyword_hits >= 3:
+            return True
+        if title_match and keyword_hits >= 1:
+            return True
+        if fp_match and title_match:
+            return True
+
+        return False
+
+    @staticmethod
+    def _normalize_body(body):
+        body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.S | re.I)
+        body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.S | re.I)
+        body = re.sub(r'<!--.*?-->', '', body, flags=re.S)
+        body = re.sub(r'\s+', ' ', body).strip()
+        return body
+
+    @staticmethod
+    def _extract_title(html):
+        m = re.search(r'<title[^>]*>(.*?)</title>', html, re.I | re.S)
+        return m.group(1).strip() if m else ''
+
+
 class ShellOrchestrator:
     """Full pipeline orchestrator matching AWVS10's execution model."""
 
@@ -224,8 +317,10 @@ class ShellOrchestrator:
         self.config = config or {}
         self.runtime = NodeRuntime(verbose=self.config.get("verbose", False))
         self.all_findings = []
+        self._finding_keys = set()
         self.stats = {"scripts_run": 0, "errors": 0, "phases": {}}
         self.site_trees = {}
+        self.soft404 = None
         self.oob_domain = self.config.get("oob_domain", OOB_DOMAIN)
 
     def _list_scripts(self, phase_dir):
@@ -378,6 +473,10 @@ class ShellOrchestrator:
                 if resp.status_code in (200, 301, 302, 403):
                     status = resp.status_code
                     size = len(resp.content)
+                    if self.soft404 and status == 200 and self.soft404.is_soft_404(status, resp.text, url):
+                        if self.config.get("verbose"):
+                            print(f"    [SOFT404] {path} (custom 404 page)")
+                        continue
                     if size > 0 and status != 404:
                         entry = {
                             "path": path,
@@ -391,7 +490,7 @@ class ShellOrchestrator:
                             entry["sensitive"] = True
                             entry["finding_type"] = sensitive
                             sev = "high" if sensitive in ("git_exposed", "env_file", "backup_file", "credentials") else "medium"
-                            self.all_findings.append({
+                            self._add_finding({
                                 "name": f"Sensitive path: {path}",
                                 "severity": sev,
                                 "affects": url,
@@ -624,6 +723,20 @@ class ShellOrchestrator:
         return ctx
 
     @staticmethod
+    def _finding_key(data):
+        name = data.get("name", "")
+        affects = data.get("affects", "")
+        return f"{name}|{affects}"
+
+    def _add_finding(self, data):
+        key = self._finding_key(data)
+        if key in self._finding_keys:
+            return False
+        self._finding_keys.add(key)
+        self.all_findings.append(data)
+        return True
+
+    @staticmethod
     def _severity_label(sev):
         if isinstance(sev, int):
             return ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"][min(sev, 4)]
@@ -631,7 +744,8 @@ class ShellOrchestrator:
 
     def _on_script_event(self, event_type, data):
         if event_type == "finding":
-            self.all_findings.append(data)
+            if not self._add_finding(data):
+                return
             sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
             print(f"    [!] [{sev}] {name}")
@@ -691,6 +805,19 @@ class ShellOrchestrator:
             print(f"  Frameworks: {', '.join(server_info['frameworks'])}")
         if server_info.get("js_frameworks"):
             print(f"  JS Frameworks: {', '.join(server_info['js_frameworks'])}")
+
+        # Phase 0.3: Soft 404 Calibration
+        print("\n  [SOFT404] Calibrating custom error page detection")
+        self.soft404 = Soft404Detector(
+            target_url,
+            headers=self.config.get("headers", {}),
+            delay=self.config.get("delay", 1.0),
+        )
+        self.soft404.calibrate()
+        if self.soft404._fingerprints:
+            print(f"  [SOFT404] {len(self.soft404._fingerprints)} fingerprints captured")
+        else:
+            print("  [SOFT404] No custom 404 pages detected (server returns real 404s)")
 
         # Phase 0.5: Port Scan
         parsed = urlparse(target_url)
@@ -953,7 +1080,8 @@ class ShellOrchestrator:
     def _on_script_event_quiet(self, event_type, data):
         """Event handler for silent mode -- still collect findings."""
         if event_type == "finding":
-            self.all_findings.append(data)
+            if not self._add_finding(data):
+                return
             sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
             print(f"\n    [!] [{sev}] {name}")
@@ -968,7 +1096,7 @@ class ShellOrchestrator:
         print(f"{'=' * 60}")
         print(f"Scripts run: {self.stats['scripts_run']}")
         print(f"Errors: {self.stats['errors']}")
-        print(f"Total findings: {len(self.all_findings)}")
+        print(f"Unique findings: {len(self.all_findings)}")
 
         if self.all_findings:
             by_severity = {}

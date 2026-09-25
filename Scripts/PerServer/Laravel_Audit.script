@@ -92,7 +92,8 @@ function testIgnitionRCE() {
         var body = job.response.body;
         if (job.response.msg2 != 404 && job.response.msg2 != 405) {
             if (body.indexOf("solutions") != -1 || body.indexOf("Facade") != -1 ||
-                body.indexOf("variableName") != -1 || job.response.msg2 == 500) {
+                body.indexOf("variableName") != -1 ||
+                (job.response.msg2 == 500 && (body.indexOf("Ignition") != -1 || body.indexOf("laravel") != -1 || body.indexOf("execute-solution") != -1))) {
 
                 var ri = new TReportItem();
                 ri.LoadFromFile("Application_Error.xml");
@@ -322,8 +323,9 @@ function testPHARUpload() {
 
         if (!job.wasError && (job.response.msg2 == 200 || job.response.msg2 == 405 || job.response.msg2 == 302)) {
             var body = job.response.body;
-            if (body.indexOf("upload") != -1 || body.indexOf("file") != -1 ||
-                body.indexOf("multipart") != -1 || job.response.msg2 == 405) {
+            if (body.indexOf("upload") != -1 || body.indexOf("multipart") != -1 ||
+                (body.indexOf("file") != -1 && (body.indexOf("form") != -1 || body.indexOf("input") != -1 || body.indexOf("submit") != -1)) ||
+                (job.response.msg2 == 405 && body.indexOf("Method") != -1)) {
 
                 var ri = new TReportItem();
                 ri.LoadFromFile("Application_Error.xml");

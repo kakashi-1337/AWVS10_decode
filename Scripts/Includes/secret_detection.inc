@@ -81,6 +81,7 @@ function isFalsePositiveContext(text, matchPos, matchValue) {
     if (isInsideIntegrityAttr(text, matchPos)) return true;
     if (isInsideCSSUrl(text, matchPos)) return true;
     if (isKnownTestKey(matchValue)) return true;
+    if (isInComment(text, matchPos)) return true;
     return false;
 }
 

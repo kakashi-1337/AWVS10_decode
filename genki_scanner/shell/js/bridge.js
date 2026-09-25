@@ -291,6 +291,11 @@ class TURL {
     }
     get Port() { return this._parsed && this._parsed.port ? this._parsed.port : ''; }
     get host() { return this._parsed ? this._parsed.hostname : ''; }
+    get hostPort() {
+        const h = this.host;
+        const p = this._parsed && this._parsed.port ? this._parsed.port : '';
+        return p ? `${h}:${p}` : h;
+    }
 
     toString() { return this.url; }
 }
@@ -353,6 +358,7 @@ class TList {
     constructor() { this._items = []; }
     add(item) { this._items.push(item); return this._items.length - 1; }
     item(i) { return this._items[i]; }
+    getFile(i) { return this._items[i]; }
     get count() { return this._items.length; }
     clear() { this._items = []; }
     indexOf(item) { return this._items.indexOf(item); }
@@ -438,11 +444,27 @@ function getCurrentScheme() {
 }
 
 function getCurrentDirectory() {
-    return SHELL_STATE.currentDirectory || { path: '/', Name: '', name: '' };
+    const dir = SHELL_STATE.currentDirectory || { path: '/', Name: '', name: '' };
+    if (!dir.isMarkedAs) {
+        dir.isMarkedAs = function(flag) { return (dir._markedFlags || 0) & flag ? true : false; };
+    }
+    if (!dir.response) dir.response = new THTTPResponse();
+    if (!dir.request) dir.request = new THTTPRequest({ _reqHeaders: {}, _body: '', verb: 'GET', URI: dir.path || '/' });
+    if (dir.fullPath === undefined) dir.fullPath = dir.path || '/';
+    if (dir.isDir === undefined) dir.isDir = true;
+    if (dir.isFile === undefined) dir.isFile = false;
+    if (dir.notFound === undefined) dir.notFound = false;
+    if (dir.ignored === undefined) dir.ignored = false;
+    if (dir.scanSiteFile === undefined) dir.scanSiteFile = true;
+    if (!dir.url && SHELL_STATE.scanURL) dir.url = new TURL(SHELL_STATE.scanURL);
+    if (dir.getFirstChild === undefined) dir.getFirstChild = function() { return null; };
+    if (dir.getNextSibling === undefined) dir.getNextSibling = function() { return null; };
+    if (dir.getFirstVariation === undefined) dir.getFirstVariation = function() { return null; };
+    return dir;
 }
 
 function getCurrentFile() {
-    if (SHELL_STATE.currentFile) return SHELL_STATE.currentFile;
+    const sf = SHELL_STATE.currentFile || null;
     const url = SHELL_STATE.scanURL || '';
     let filePath = '/';
     let fileName = '';
@@ -452,15 +474,28 @@ function getCurrentFile() {
         const parts = filePath.split('/');
         fileName = parts[parts.length - 1] || '';
     } catch {}
-    return {
+    const file = sf || {
         name: fileName,
+        Name: fileName,
         path: filePath.substring(0, filePath.lastIndexOf('/') + 1) || '/',
         fullPath: filePath,
         isFile: !!fileName && fileName.includes('.'),
         isDir: !fileName || !fileName.includes('.'),
-        response: new THTTPResponse(),
         url: url,
     };
+    if (!file.response) file.response = new THTTPResponse();
+    if (!file.request) file.request = new THTTPRequest({ _reqHeaders: {}, _body: '', verb: 'GET', URI: file.path || '/' });
+    if (!file.isMarkedAs) file.isMarkedAs = function(flag) { return (file._markedFlags || 0) & flag ? true : false; };
+    if (file.fullPath === undefined) file.fullPath = file.path || '/';
+    if (file.Name === undefined) file.Name = file.name || '';
+    if (file.getFirstChild === undefined) file.getFirstChild = function() { return null; };
+    if (file.getNextSibling === undefined) file.getNextSibling = function() { return null; };
+    if (file.getFirstVariation === undefined) file.getFirstVariation = function() { return null; };
+    if (file.notFound === undefined) file.notFound = false;
+    if (file.ignored === undefined) file.ignored = false;
+    if (file.scanSiteFile === undefined) file.scanSiteFile = true;
+    if (file.schemeCount === undefined) file.schemeCount = 0;
+    return file;
 }
 
 function getServerInfo() {
@@ -502,11 +537,36 @@ function getServerInfo() {
 
 function getSiteRoot(flags) {
     if (SHELL_STATE.siteTree) return SHELL_STATE.siteTree;
-    return { path: '/', Name: '', name: '', isDir: true, isFile: false, children: [] };
+    return makeSiteFile({
+        path: '/', Name: '', name: '', fullPath: '/',
+        isDir: true, isFile: false,
+    });
 }
 
-function getNewFiles() {
-    return SHELL_STATE.discoveredFiles || new TList();
+function getNewFiles(flags) {
+    const list = SHELL_STATE.discoveredFiles || new TList();
+    for (let i = 0; i < list.count; i++) {
+        const sf = list.item(i);
+        if (sf && !sf.isMarkedAs) {
+            sf.isMarkedAs = function(flag) { return (sf._markedFlags || 0) & flag ? true : false; };
+            if (!sf.response) sf.response = new THTTPResponse();
+            if (!sf.request) sf.request = new THTTPRequest({ _reqHeaders: {}, _body: '', verb: 'GET', URI: sf.path || '/' });
+            if (sf.fullPath === undefined) sf.fullPath = sf.path || '/';
+            if (sf.Name === undefined) sf.Name = sf.name || '';
+            if (sf.notFound === undefined) sf.notFound = false;
+            if (sf.ignored === undefined) sf.ignored = false;
+            if (sf.scanSiteFile === undefined) sf.scanSiteFile = true;
+            if (sf.isFile === undefined) sf.isFile = true;
+            if (sf.isDir === undefined) sf.isDir = false;
+            if (sf.hasVariations === undefined) sf.hasVariations = false;
+            if (sf.schemeCount === undefined) sf.schemeCount = 0;
+            if (!sf.getFirstChild) sf.getFirstChild = function() { return null; };
+            if (!sf.getNextSibling) sf.getNextSibling = function() { return null; };
+            if (!sf.getFirstVariation) sf.getFirstVariation = function() { return null; };
+            if (!sf.getScheme) sf.getScheme = function() { return null; };
+        }
+    }
+    return list;
 }
 
 function getCookies() {
@@ -732,6 +792,54 @@ class THTTPWorker {
     }
 }
 
+// ---- Site File stub (tree node for PostScan/PostCrawl) ----
+function makeSiteFile(props) {
+    const sf = Object.assign({
+        name: '',
+        Name: '',
+        path: '/',
+        url: null,
+        notFound: false,
+        ignored: false,
+        scanSiteFile: true,
+        schemeCount: 0,
+        internalId: 0,
+        response: new THTTPResponse(),
+        request: new THTTPRequest({ _reqHeaders: {}, _body: '', verb: 'GET', URI: '/' }),
+        _children: [],
+        _siblings: [],
+        _variations: [],
+        _markedFlags: 0,
+    }, props || {});
+    sf.isMarkedAs = function(flag) { return (sf._markedFlags & flag) !== 0; };
+    sf.getFirstChild = function() { return sf._children.length > 0 ? sf._children[0] : null; };
+    sf.getNextSibling = function() {
+        if (sf._parent && sf._parent._children) {
+            const idx = sf._parent._children.indexOf(sf);
+            if (idx >= 0 && idx + 1 < sf._parent._children.length) return sf._parent._children[idx + 1];
+        }
+        return null;
+    };
+    sf.getFirstVariation = function() { return sf._variations.length > 0 ? sf._variations[0] : null; };
+    sf.getScheme = function(i) { return null; };
+    return sf;
+}
+
+function getSiteFileWithPath(pathStr, flag) {
+    const scanUrl = SHELL_STATE.scanURL || '';
+    let fullPath = pathStr || '/';
+    return makeSiteFile({
+        name: fullPath.split('/').pop() || '',
+        Name: fullPath.split('/').pop() || '',
+        path: fullPath,
+        url: scanUrl ? new TURL(scanUrl) : null,
+    });
+}
+
+function terminate() {
+    throw new Error('__terminate__');
+}
+
 // ---- Output helper ----
 function _output(type, data) {
     const msg = JSON.stringify({ type, data }) + '\n';
@@ -746,6 +854,7 @@ module.exports = {
     getGlobalValue, setGlobalValue,
     getCurrentScheme, getCurrentDirectory, getCurrentFile, getServerInfo, getNewFiles, getCookies, setCookies,
     getSiteRoot, getHTTPWorker,
+    getSiteFileWithPath, makeSiteFile, terminate,
     addStoredInjectionEntry, getStoredInjectionList,
     addHTTPJobToCrawler, addLinkToCrawler, getHostByName, random,
     Plain2SHA1, Plain2MD5, plain2md5, getFileName, getFileExt,

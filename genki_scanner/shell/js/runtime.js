@@ -67,6 +67,8 @@ function buildSandbox() {
         b642plain: bridge.b642plain,
         plain2b64: bridge.plain2b64,
         alert2: bridge.alert2,
+        getSiteFileWithPath: bridge.getSiteFileWithPath,
+        terminate: bridge.terminate,
 
         // JS builtins - only add what VM contexts don't provide natively
         Buffer: Buffer,
@@ -87,6 +89,7 @@ function buildSandbox() {
         // scan context (set per command)
         scanURL: null,
         ScanURL: null,
+        scanUrl: null,
         scanHost: '',
         ScanHost: '',
         scanIP: '',
@@ -152,6 +155,7 @@ function executeScript(scriptPath, scriptsDir, context) {
         const urlObj = new bridge.TURL(context.scanURL);
         sandbox.scanURL = urlObj;
         sandbox.ScanURL = urlObj;
+        sandbox.scanUrl = urlObj;
         sandbox.scanHost = urlObj.host || '';
         sandbox.ScanHost = sandbox.scanHost;
     }
@@ -198,6 +202,9 @@ function executeScript(scriptPath, scriptsDir, context) {
         });
         return { success: true, findings: bridge.SHELL_STATE.findings.length };
     } catch (e) {
+        if (e.message === '__terminate__') {
+            return { success: true, findings: bridge.SHELL_STATE.findings.length };
+        }
         return { success: false, error: e.message, stack: e.stack };
     }
 }

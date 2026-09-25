@@ -80,8 +80,11 @@ function testMagentoCVEs() {
 
     if (!job.wasError && job.response.msg2 != 404) {
         var body = job.response.body;
-        if (body.indexOf("shipping") != -1 || body.indexOf("carrier") != -1 ||
-            job.response.msg2 == 200) {
+        var hasRestMarker = (body.indexOf("shipping") != -1 && body.indexOf("carrier") != -1) ||
+                            (body.indexOf("shipping_method") != -1) ||
+                            (body.indexOf("\"error\"") != -1 && body.indexOf("magento") != -1) ||
+                            (body.indexOf("guest-carts") != -1);
+        if (hasRestMarker) {
             var ri = new TReportItem();
             ri.LoadFromFile("Application_Error.xml");
             ri.affects = "/rest/V1/guest-carts/";
@@ -120,8 +123,9 @@ function testMagentoCVEs() {
 
     if (!job2.wasError) {
         var body2 = job2.response.body;
-        if (body2.indexOf("getTemplateFilter") != -1 || body2.indexOf("Magento") != -1 ||
-            (job2.response.msg2 == 500 && body2.indexOf("template") != -1)) {
+        if (body2.indexOf("getTemplateFilter") != -1 ||
+            (body2.indexOf("Magento") != -1 && (body2.indexOf("template") != -1 || body2.indexOf("filter") != -1)) ||
+            (job2.response.msg2 == 500 && body2.indexOf("template") != -1 && (body2.indexOf("Magento") != -1 || body2.indexOf("directive") != -1 || body2.indexOf("filter") != -1))) {
             var ri = new TReportItem();
             ri.LoadFromFile("Application_Error.xml");
             ri.affects = "/rest/V1/guest-carts/";
@@ -142,6 +146,14 @@ function testMagentoCVEs() {
     job3.execute();
 
     if (!job3.wasError && job3.response.msg2 != 404) {
+        var body3 = job3.response.body;
+        var hasWysiwygMarker = body3.indexOf("Magento") != -1 ||
+                               body3.indexOf("admin") != -1 ||
+                               body3.indexOf("wysiwyg") != -1 ||
+                               body3.indexOf("directive") != -1 ||
+                               body3.indexOf("login") != -1 ||
+                               job3.response.msg2 == 302;
+        if (!hasWysiwygMarker) return;
         var ri = new TReportItem();
         ri.LoadFromFile("Application_Error.xml");
         ri.affects = "/admin/Cms_Wysiwyg/directive/index/";
