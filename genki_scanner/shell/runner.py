@@ -2,18 +2,28 @@
 Shell Runner - Python orchestrator for AWVS10 decoded script execution.
 Spawns a Node.js runtime, manages phases, feeds scripts in order.
 Full pipeline: tech detect -> crawl -> dir enum -> scan all phases -> report.
+
+Phase data wiring:
+  PerServer  - runs each script once per target
+  PerFolder  - runs each script per discovered directory
+  PerFile    - runs each script per discovered file
+  PerScheme  - runs each script per discovered input scheme (params to fuzz)
+  PostCrawl  - runs each script once with full file list via getNewFiles()
+  PostScan   - runs each script once at the end
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import signal
 import socket
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, parse_qs
 
 from .tech_detect import detect_technologies, WAF_SIGNATURES
+from .site_tree import SiteTree, Scheme, SiteFile
 
 
 PHASE_ORDER = [
@@ -223,6 +233,8 @@ class ShellOrchestrator:
                 scripts.append(os.path.join(full_path, f))
         return scripts
 
+    # ---- Technology / Server Detection ----
+
     def _detect_server(self, target_url):
         parsed = urlparse(target_url)
         info = {
@@ -267,6 +279,7 @@ class ShellOrchestrator:
             info["cdn"] = tech_result.get("cdn", [])
             info["response_headers"] = resp_headers
             info["status_code"] = resp.status_code
+            info["_body"] = resp.text
 
         except Exception as e:
             print(f"  [WARN] Server probe failed: {e}")
@@ -395,6 +408,198 @@ class ShellOrchestrator:
         print(f"    [DONE] {len(found)} paths found")
         return found
 
+    # ---- Site Tree Building (SPA-aware) ----
+
+    def _extract_from_html(self, html, base_url):
+        """Extract links, forms, script srcs, and inline API refs from HTML."""
+        parsed_base = urlparse(base_url)
+        links = set()
+        forms = []
+        api_endpoints = set()
+
+        for match in re.finditer(r'<a\s[^>]*href=["\']([^"\'#]+)["\']', html, re.I):
+            href = match.group(1)
+            if href.startswith(('javascript:', 'mailto:', 'tel:', 'data:')):
+                continue
+            full_url = urljoin(base_url, href)
+            if urlparse(full_url).hostname == parsed_base.hostname:
+                links.add(full_url.split('#')[0])
+
+        for match in re.finditer(r'<(?:script|link)\s[^>]*(?:src|href)=["\']([^"\']+)["\']', html, re.I):
+            src = match.group(1)
+            full_url = urljoin(base_url, src)
+            if urlparse(full_url).hostname == parsed_base.hostname:
+                links.add(full_url)
+
+        for match in re.finditer(r'<img\s[^>]*src=["\']([^"\']+)["\']', html, re.I):
+            src = match.group(1)
+            full_url = urljoin(base_url, src)
+            if urlparse(full_url).hostname == parsed_base.hostname:
+                links.add(full_url)
+
+        form_pattern = re.compile(r'<form\s([^>]*)>(.*?)</form>', re.I | re.S)
+        for fm in form_pattern.finditer(html):
+            attrs = fm.group(1)
+            body = fm.group(2)
+
+            action = base_url
+            method = 'GET'
+
+            action_match = re.search(r'action=["\']([^"\']+)["\']', attrs, re.I)
+            if action_match:
+                action = urljoin(base_url, action_match.group(1))
+            method_match = re.search(r'method=["\']([^"\']+)["\']', attrs, re.I)
+            if method_match:
+                method = method_match.group(1).upper()
+
+            inputs = []
+            for inp_match in re.finditer(r'<(?:input|textarea|select)\s([^>]*)/?>', body, re.I):
+                inp_attrs = inp_match.group(1)
+                name_m = re.search(r'name=["\']([^"\']+)["\']', inp_attrs, re.I)
+                if not name_m:
+                    continue
+                value_m = re.search(r'value=["\']([^"\']*)["\']', inp_attrs, re.I)
+                type_m = re.search(r'type=["\']([^"\']+)["\']', inp_attrs, re.I)
+                inputs.append({
+                    'name': name_m.group(1),
+                    'value': value_m.group(1) if value_m else '',
+                    'type': type_m.group(1) if type_m else 'text',
+                })
+
+            if inputs:
+                forms.append({'action': action, 'method': method, 'inputs': inputs})
+
+        for match in re.finditer(r'(?:api|endpoint|url)\s*[:=]\s*["\']([/][^"\']+)["\']', html, re.I):
+            ep = urljoin(base_url, match.group(1))
+            if urlparse(ep).hostname == parsed_base.hostname:
+                api_endpoints.add(ep)
+
+        return links, forms, api_endpoints
+
+    def _extract_api_from_js(self, js_code, base_url):
+        """Extract API endpoints from JavaScript source code (SPA bundles)."""
+        endpoints = set()
+        parsed = urlparse(base_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+
+        patterns = [
+            r'(?:fetch|axios\.(?:get|post|put|delete|patch)|http\.(?:get|post|put|delete|patch))\s*\(\s*["\']([/][^"\']*)["\']',
+            r'(?:url|endpoint|apiUrl|baseUrl|base_url|API_URL|API_BASE|apiBase)\s*[:=]\s*["\']([/][^"\']+)["\']',
+            r'\.(?:get|post|put|delete|patch|head|options)\s*(?:<[^>]*>)?\s*\(\s*["\']([/][^"\']+)["\']',
+            r'(?:path|route)\s*:\s*["\']([/][a-zA-Z0-9/_\-:]+)["\']',
+            r'[`]([/](?:api|rest|v\d+)[/][^`\n]{3,60})[`]',
+            r'["\']([/][^"\']*graphql[^"\']*)["\']',
+            r'["\']([/](?:api|rest|service|backend)[/][^"\']{2,80})["\']',
+        ]
+
+        static_exts = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.ico',
+                       '.woff', '.woff2', '.ttf', '.eot', '.map'}
+
+        for pat in patterns:
+            for match in re.finditer(pat, js_code, re.I):
+                path = match.group(1)
+                if not path or path.startswith('//'):
+                    continue
+                ext = os.path.splitext(path.split('?')[0])[1].lower()
+                if ext in static_exts:
+                    continue
+                endpoints.add(base + path)
+
+        return endpoints
+
+    def _build_site_tree(self, target_url, server_info):
+        """Build site tree from browser crawl data or basic HTTP extraction."""
+        if target_url in self.site_trees:
+            tree = self.site_trees[target_url]
+            print(f"  [TREE] Browser crawl: {len(tree.all_files)} files, "
+                  f"{len(tree.all_schemes)} schemes, {len(tree.all_directories)} dirs")
+            return tree
+
+        tree = SiteTree(target_url)
+        tree.add_url(target_url)
+        tree._cookies = ""
+
+        print(f"\n  [TREE] Building site tree from HTTP responses")
+
+        try:
+            import requests as req_lib
+            headers = dict(self.config.get("headers", {}))
+            if "User-Agent" not in headers:
+                headers["User-Agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                )
+
+            body = server_info.get("_body", "")
+            if not body:
+                resp = req_lib.get(target_url, timeout=10, verify=False,
+                                  headers=headers, allow_redirects=True)
+                body = resp.text
+                cookie_header = resp.headers.get("Set-Cookie", "")
+            else:
+                cookie_header = server_info.get("response_headers", {}).get("Set-Cookie", "")
+
+            links, forms, api_endpoints = self._extract_from_html(body, target_url)
+
+            parsed_base = urlparse(target_url)
+            same_host = [l for l in links if urlparse(l).hostname == parsed_base.hostname]
+
+            for link in same_host[:200]:
+                tree.add_url(link)
+
+            for form in forms:
+                tree.add_form(form['action'], form['method'], form.get('inputs', []))
+
+            js_urls = [l for l in same_host
+                       if re.search(r'\.js(\?|$)', urlparse(l).path.split('/')[-1])]
+
+            all_api_eps = set(api_endpoints)
+            if js_urls:
+                print(f"  [TREE] Scanning {min(len(js_urls), 15)} JS files for API endpoints")
+
+            delay = self.config.get("delay", 1.0)
+            for js_url in js_urls[:15]:
+                try:
+                    js_resp = req_lib.get(js_url, timeout=10, verify=False, headers=headers)
+                    if js_resp.status_code == 200 and len(js_resp.text) > 50:
+                        js_api_eps = self._extract_api_from_js(js_resp.text, target_url)
+                        all_api_eps.update(js_api_eps)
+                    time.sleep(delay * 0.3)
+                except Exception:
+                    pass
+
+            for ep in all_api_eps:
+                if urlparse(ep).hostname == parsed_base.hostname:
+                    tree.add_url(ep)
+
+            cookie_parts = []
+            for c in cookie_header.split(','):
+                c = c.strip()
+                if '=' in c:
+                    cookie_parts.append(c.split(';')[0].strip())
+            tree._cookies = '; '.join(cookie_parts)
+
+            # Also add discovered directories from dir_enum if available
+            dir_results = server_info.get("directories", [])
+            for d in dir_results:
+                dpath = d.get("path", "")
+                if dpath:
+                    durl = urljoin(target_url.rstrip('/') + '/', dpath)
+                    tree.add_url(durl)
+
+            print(f"  [TREE] {len(tree.all_files)} files, {len(tree.all_schemes)} schemes, "
+                  f"{len(tree.all_directories)} dirs")
+            if all_api_eps:
+                print(f"  [TREE] {len(all_api_eps)} API endpoints from JS analysis")
+
+        except Exception as e:
+            print(f"  [WARN] Site tree extraction failed: {e}")
+
+        self.site_trees[target_url] = tree
+        return tree
+
+    # ---- Context Building ----
+
     def _build_context(self, target_url, server_info, **extra):
         ctx = {
             "scanURL": target_url,
@@ -402,6 +607,8 @@ class ShellOrchestrator:
             "serverInfo": server_info,
             "oobDomain": self.oob_domain,
         }
+        if "siteTree" in extra and extra["siteTree"] and hasattr(extra["siteTree"], 'to_js_object'):
+            extra["siteTree"] = extra["siteTree"].to_js_object()
         ctx.update(extra)
         return ctx
 
@@ -420,9 +627,11 @@ class ShellOrchestrator:
         elif event_type == "progress":
             pass
 
+    # ---- Main Pipeline ----
+
     def run(self, targets, phases=None, modules=None):
         print(f"\n{'=' * 60}")
-        print("GENKI SHELL v1.0 - AWVS10 Script Runtime")
+        print("GENKI SHELL v1.1 - AWVS10 Script Runtime")
         print("Genki Tech Labs / Anbu Black Ops")
         print(f"{'=' * 60}")
         print(f"Targets: {len(targets)}")
@@ -463,6 +672,8 @@ class ShellOrchestrator:
             print(f"  CMS: {', '.join(server_info['cms'])}")
         if server_info.get("frameworks"):
             print(f"  Frameworks: {', '.join(server_info['frameworks'])}")
+        if server_info.get("js_frameworks"):
+            print(f"  JS Frameworks: {', '.join(server_info['js_frameworks'])}")
 
         # Phase 0.5: Port Scan
         parsed = urlparse(target_url)
@@ -472,7 +683,7 @@ class ShellOrchestrator:
         else:
             server_info["open_ports"] = []
 
-        # Phase 1: Browser Crawl
+        # Phase 1: Browser Crawl (if enabled)
         if self.config.get("browser"):
             self._browser_crawl(target_url)
 
@@ -481,19 +692,22 @@ class ShellOrchestrator:
             dir_results = self._dir_enum(target_url, server_info)
             server_info["directories"] = dir_results
 
+        # Phase 1.7: Build Site Tree (from browser crawl or basic HTTP extraction)
+        site_tree = self._build_site_tree(target_url, server_info)
+
         # Phase 2+: AWVS Script Phases
         active_phases = phases or [p[0] for p in PHASE_ORDER]
 
         for phase_name, phase_type in PHASE_ORDER:
             if phase_name not in active_phases:
                 continue
-            self._run_phase(phase_name, phase_type, target_url, server_info)
+            self._run_phase(phase_name, phase_type, target_url, server_info, site_tree)
 
         if "Network" in active_phases or not phases:
             pass
 
         if "WebApps" in active_phases or not phases:
-            self._run_phase("WebApps", "webapps", target_url, server_info)
+            self._run_phase("WebApps", "webapps", target_url, server_info, site_tree)
 
     def _browser_crawl(self, target_url):
         try:
@@ -507,37 +721,206 @@ class ShellOrchestrator:
             if target_url in trees:
                 self.site_trees[target_url] = trees[target_url]
                 tree = trees[target_url]
-                print(f"  [CRAWL] {len(tree.all_files)} pages, {len(tree.all_schemes)} schemes, {len(tree.all_directories)} dirs")
+                print(f"  [CRAWL] {len(tree.all_files)} pages, "
+                      f"{len(tree.all_schemes)} schemes, {len(tree.all_directories)} dirs")
         except ImportError:
             print("  [WARN] Browser module not available (pip install playwright)")
         except Exception as e:
             print(f"  [WARN] Browser crawl failed: {e}")
 
-    def _run_phase(self, phase_name, phase_type, target_url, server_info):
+    # ---- Phase Execution (per-item iteration) ----
+
+    def _run_phase(self, phase_name, phase_type, target_url, server_info, site_tree=None):
         scripts = self._list_scripts(phase_name)
         if not scripts:
             return
 
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts")
         self.stats["phases"][phase_name] = {"total": len(scripts), "run": 0, "findings": 0}
 
-        context = self._build_context(target_url, server_info)
+        if phase_type in ("server", "postscan", "webapps"):
+            self._run_phase_single(phase_name, scripts, target_url, server_info, site_tree)
 
+        elif phase_type == "postcrawl":
+            self._run_phase_postcrawl(phase_name, scripts, target_url, server_info, site_tree)
+
+        elif phase_type == "folder":
+            self._run_phase_per_folder(phase_name, scripts, target_url, server_info, site_tree)
+
+        elif phase_type == "file":
+            self._run_phase_per_file(phase_name, scripts, target_url, server_info, site_tree)
+
+        elif phase_type == "scheme":
+            self._run_phase_per_scheme(phase_name, scripts, target_url, server_info, site_tree)
+
+    def _run_phase_single(self, phase_name, scripts, target_url, server_info, site_tree):
+        """Run each script once (PerServer, PostScan, WebApps)."""
+        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts")
+        context = self._build_context(target_url, server_info, siteTree=site_tree)
         for i, script_path in enumerate(scripts):
-            script_name = os.path.basename(script_path)
-            print(f"    [{i+1}/{len(scripts)}] {script_name}", end="", flush=True)
+            self._execute_one(script_path, context, phase_name, i, len(scripts))
 
-            findings_before = len(self.all_findings)
-            result, findings = self.runtime.execute_script_full(
-                script_path, context, callback=self._on_script_event
+    def _run_phase_postcrawl(self, phase_name, scripts, target_url, server_info, site_tree):
+        """Run each script once with discovered files list and cookies."""
+        discovered = []
+        if site_tree:
+            for url, sf in site_tree.all_files.items():
+                p = urlparse(url).path or '/'
+                discovered.append({
+                    'url': url,
+                    'path': p,
+                    'Name': os.path.basename(p) or 'index',
+                    'name': os.path.basename(p) or 'index',
+                })
+
+        cookies = getattr(site_tree, '_cookies', '') if site_tree else ''
+        if not cookies:
+            cookies = getattr(site_tree, '_browser_cookies', '') if site_tree else ''
+            if isinstance(cookies, list):
+                cookies = '; '.join(f"{c.get('name', '')}={c.get('value', '')}" for c in cookies)
+
+        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts ({len(discovered)} discovered files)")
+        context = self._build_context(
+            target_url, server_info,
+            siteTree=site_tree,
+            discoveredFiles=discovered,
+            cookies=cookies,
+        )
+        for i, script_path in enumerate(scripts):
+            self._execute_one(script_path, context, phase_name, i, len(scripts))
+
+    def _run_phase_per_folder(self, phase_name, scripts, target_url, server_info, site_tree):
+        """Run each script per discovered directory."""
+        directories = sorted(site_tree.all_directories) if site_tree else ['/']
+        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(directories)} directories")
+
+        for dir_idx, dir_path in enumerate(directories):
+            dir_name = dir_path.rstrip('/').split('/')[-1] or '/'
+            if self.config.get("verbose"):
+                print(f"    Dir [{dir_idx+1}/{len(directories)}] {dir_path}")
+
+            context = self._build_context(
+                target_url, server_info,
+                siteTree=site_tree,
+                directory={'path': dir_path, 'Name': dir_name, 'name': dir_path},
             )
 
-            self.stats["scripts_run"] += 1
-            self.stats["phases"][phase_name]["run"] += 1
+            dir_findings_before = len(self.all_findings)
+            for i, script_path in enumerate(scripts):
+                self._execute_one(
+                    script_path, context, phase_name, i, len(scripts),
+                    silent=not self.config.get("verbose"),
+                )
 
-            new_findings = len(self.all_findings) - findings_before
-            self.stats["phases"][phase_name]["findings"] += new_findings
+            dir_new = len(self.all_findings) - dir_findings_before
+            if dir_new:
+                print(f"    Dir [{dir_idx+1}/{len(directories)}] {dir_path} -> {dir_new} findings")
 
+        total_run = self.stats["phases"][phase_name]["run"]
+        total_findings = self.stats["phases"][phase_name]["findings"]
+        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+
+    def _run_phase_per_file(self, phase_name, scripts, target_url, server_info, site_tree):
+        """Run each script per discovered file."""
+        files = []
+        if site_tree:
+            for url, sf in site_tree.all_files.items():
+                p = urlparse(url).path or '/'
+                files.append({
+                    'url': url,
+                    'path': p,
+                    'Name': os.path.basename(p) or 'index',
+                    'name': os.path.basename(p) or 'index',
+                })
+
+        if not files:
+            p = urlparse(target_url).path or '/'
+            files = [{'url': target_url, 'path': p,
+                       'Name': os.path.basename(p) or 'index',
+                       'name': os.path.basename(p) or 'index'}]
+
+        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(files)} files")
+
+        for file_idx, file_ctx in enumerate(files):
+            if self.config.get("verbose"):
+                print(f"    File [{file_idx+1}/{len(files)}] {file_ctx['path']}")
+
+            context = self._build_context(
+                target_url, server_info,
+                siteTree=site_tree,
+                file=file_ctx,
+            )
+
+            file_findings_before = len(self.all_findings)
+            for i, script_path in enumerate(scripts):
+                self._execute_one(
+                    script_path, context, phase_name, i, len(scripts),
+                    silent=not self.config.get("verbose"),
+                )
+
+            file_new = len(self.all_findings) - file_findings_before
+            if file_new:
+                print(f"    File [{file_idx+1}/{len(files)}] {file_ctx['path']} -> {file_new} findings")
+
+        total_run = self.stats["phases"][phase_name]["run"]
+        total_findings = self.stats["phases"][phase_name]["findings"]
+        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+
+    def _run_phase_per_scheme(self, phase_name, scripts, target_url, server_info, site_tree):
+        """Run each script per discovered input scheme (the real fuzzing)."""
+        schemes = site_tree.all_schemes if site_tree else []
+        if not schemes:
+            print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x 0 schemes (no inputs discovered)")
+            return
+
+        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(schemes)} schemes")
+
+        for sch_idx, scheme in enumerate(schemes):
+            label = f"{scheme.method} {scheme.path} ({len(scheme.inputs)} inputs)"
+            if self.config.get("verbose"):
+                print(f"    Scheme [{sch_idx+1}/{len(schemes)}] {label}")
+
+            context = self._build_context(
+                target_url, server_info,
+                siteTree=site_tree,
+                scheme=scheme.to_js_object(),
+            )
+
+            sch_findings_before = len(self.all_findings)
+            for i, script_path in enumerate(scripts):
+                self._execute_one(
+                    script_path, context, phase_name, i, len(scripts),
+                    silent=not self.config.get("verbose"),
+                )
+
+            sch_new = len(self.all_findings) - sch_findings_before
+            if sch_new:
+                print(f"    Scheme [{sch_idx+1}/{len(schemes)}] {label} -> {sch_new} findings")
+
+        total_run = self.stats["phases"][phase_name]["run"]
+        total_findings = self.stats["phases"][phase_name]["findings"]
+        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+
+    def _execute_one(self, script_path, context, phase_name, idx, total,
+                     extra="", silent=False):
+        """Execute a single script and track results."""
+        script_name = os.path.basename(script_path)
+
+        if not silent:
+            label = f" ({extra})" if extra else ""
+            print(f"    [{idx+1}/{total}] {script_name}{label}", end="", flush=True)
+
+        findings_before = len(self.all_findings)
+        result, findings = self.runtime.execute_script_full(
+            script_path, context, callback=self._on_script_event if not silent else self._on_script_event_quiet
+        )
+
+        self.stats["scripts_run"] += 1
+        self.stats["phases"][phase_name]["run"] += 1
+
+        new_findings = len(self.all_findings) - findings_before
+        self.stats["phases"][phase_name]["findings"] += new_findings
+
+        if not silent:
             if result.get("success"):
                 status = f" [{new_findings} findings]" if new_findings else ""
                 print(f" OK{status}")
@@ -547,6 +930,20 @@ class ShellOrchestrator:
                     print(f" SKIP ({err[:60]})")
                 else:
                     print(f" ERR ({err[:60]})")
+
+        return result, new_findings
+
+    def _on_script_event_quiet(self, event_type, data):
+        """Event handler for silent mode -- still collect findings."""
+        if event_type == "finding":
+            self.all_findings.append(data)
+            sev = data.get("severity", "info").upper()
+            name = data.get("name", "Unknown")
+            print(f"\n    [!] [{sev}] {name}")
+        elif event_type == "error":
+            self.stats["errors"] += 1
+
+    # ---- Summary & Output ----
 
     def _print_summary(self):
         print(f"\n{'=' * 60}")
@@ -624,7 +1021,7 @@ def _check_sensitive(path, body, status):
         return "spring_actuator"
     if "swagger" in p and status == 200:
         return "api_docs"
-    if p == "crossdomain.xml" and "<allow-access-from domain=\"*\"" in body:
+    if p == "crossdomain.xml" and '<allow-access-from domain="*"' in body:
         return "permissive_crossdomain"
     if ".aws/credentials" in p and "aws_access_key" in body.lower():
         return "credentials"

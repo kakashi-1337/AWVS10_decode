@@ -1,0 +1,112 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+function testGraphQL(path) {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = path;
+    job.verb = "POST";
+    job.postData = '{"query":"{ __schema { types { name } } }"}';
+    job.request.addHeader("Content-Type", "application/json");
+    job.execute();
+
+    if (job.wasError) return null;
+    return job;
+}
+
+function testIntrospection(path) {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = path;
+    job.verb = "POST";
+    job.postData = '{"query":"{ __schema { queryType { name } mutationType { name } types { name kind fields { name type { name kind } } } } }"}';
+    job.request.addHeader("Content-Type", "application/json");
+    job.execute();
+
+    if (job.wasError) return null;
+    return job;
+}
+
+function testGraphQLGet(path) {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = path + "?query=%7B%20__schema%20%7B%20types%20%7B%20name%20%7D%20%7D%20%7D";
+    job.verb = "GET";
+    job.execute();
+
+    if (job.wasError) return null;
+    return job;
+}
+
+var graphqlPaths = [
+    "/graphql",
+    "/graphql/v1",
+    "/graphql/v2",
+    "/api/graphql",
+    "/api/v1/graphql",
+    "/v1/graphql",
+    "/gql",
+    "/query",
+    "/api/query",
+];
+
+for (var i = 0; i < graphqlPaths.length; i++) {
+    var gqlPath = graphqlPaths[i];
+    var job = testGraphQL(gqlPath);
+
+    if (job && job.response.msg2 == 200) {
+        var body = job.response.body;
+
+        if (body.indexOf("__schema") != -1 || body.indexOf("types") != -1) {
+            // GraphQL endpoint found, test introspection
+            var introJob = testIntrospection(gqlPath);
+            if (introJob && introJob.response.msg2 == 200) {
+                var introBody = introJob.response.body;
+                if (introBody.indexOf("queryType") != -1 || introBody.indexOf("fields") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = gqlPath;
+                    ri.alertPath = "Scripts/GraphQL";
+                    ri.name = "GraphQL Introspection Enabled";
+                    ri.severity = 2;
+                    ri.setHttpInfo(introJob);
+
+                    // extract type names
+                    var typeNames = [];
+                    try {
+                        var parsed = JSON.parse(introBody);
+                        var types = parsed.data.__schema.types;
+                        for (var t = 0; t < types.length; t++) {
+                            if (types[t].name && types[t].name.indexOf("__") != 0) {
+                                typeNames.push(types[t].name);
+                            }
+                        }
+                    } catch(e) {}
+
+                    ri.details = "GraphQL introspection is enabled at [bold]" + gqlPath + "[/bold].[break]" +
+                        "An attacker can discover the entire API schema including types, fields, and mutations.[break]" +
+                        (typeNames.length > 0 ? "Discovered types: " + typeNames.join(", ") : "");
+                    AddReportItem(ri);
+                }
+            }
+
+            // Also check if GET method works (additional exposure)
+            var getJob = testGraphQLGet(gqlPath);
+            if (getJob && getJob.response.msg2 == 200 &&
+                getJob.response.body.indexOf("__schema") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = gqlPath;
+                ri.alertPath = "Scripts/GraphQL";
+                ri.name = "GraphQL Accepts GET Requests";
+                ri.severity = 1;
+                ri.setHttpInfo(getJob);
+                ri.details = "GraphQL endpoint at [bold]" + gqlPath +
+                    "[/bold] accepts GET requests, which may enable CSRF attacks on GraphQL mutations.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}

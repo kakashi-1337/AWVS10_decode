@@ -1,0 +1,137 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+function classProtoPollution(scheme, inputIndex) {
+    this.scheme = scheme;
+    this.inputIndex = inputIndex;
+    this.variations = scheme.selectVariationsForInput(inputIndex);
+    this.currentVariation = 0;
+    this.foundVulnOnVariation = false;
+    this.lastJob = null;
+}
+
+classProtoPollution.prototype.request = function(value, contentType) {
+    this.scheme.loadVariation(this.variations.item(this.currentVariation));
+    this.scheme.setInputValue(this.inputIndex, value);
+    this.lastJob = new THTTPJob();
+    this.lastJob.url = targetUrl;
+    scheme.populateRequest(this.lastJob);
+
+    if (contentType) {
+        this.lastJob.request.addHeader("Content-Type", contentType);
+    }
+
+    this.lastJob.execute();
+    return (!this.lastJob.wasError);
+};
+
+classProtoPollution.prototype.requestRaw = function(path, body, method) {
+    this.lastJob = new THTTPJob();
+    this.lastJob.url = targetUrl;
+    this.lastJob.URI = path;
+    this.lastJob.verb = method || "POST";
+    this.lastJob.postData = body;
+    this.lastJob.request.addHeader("Content-Type", "application/json");
+    this.lastJob.execute();
+    return (!this.lastJob.wasError);
+};
+
+classProtoPollution.prototype.alert = function(testValue, details) {
+    this.foundVulnOnVariation = true;
+    var ri = new TReportItem();
+    ri.LoadFromFile("NodeJs_injection.xml");
+    ri.affects = this.scheme.path;
+    ri.alertPath = "Scripts/Prototype Pollution";
+    ri.parameter = this.scheme.getInputName(this.inputIndex);
+    ri.parameterValue = testValue;
+    ri.setHttpInfo(this.lastJob);
+    ri.name = "Prototype Pollution";
+    ri.severity = 3;
+    ri.details = details;
+    AddReportItem(ri);
+};
+
+classProtoPollution.prototype.startTesting = function() {
+    for (var v = 0; v < this.variations.count; v++) {
+        if (this.foundVulnOnVariation) break;
+        this.currentVariation = v;
+        this.scheme.loadVariation(this.variations.item(v));
+
+        var inputType = this.scheme.getInputTypeStr(this.inputIndex);
+        var canary = "pp" + Math.floor(Math.random() * 99999);
+
+        // Test 1: __proto__ via JSON body
+        if (inputType == "URL encoded POST" || inputType == "URL encoded GET") {
+            var payload1 = '{"__proto__":{"' + canary + '":"polluted"}}';
+            if (this.requestRaw(this.scheme.path, payload1, "POST")) {
+                // check if property persists
+                if (this.requestRaw(this.scheme.path, '{}', "POST")) {
+                    if (this.lastJob.response.body.indexOf(canary) != -1 ||
+                        this.lastJob.response.body.indexOf("polluted") != -1) {
+                        this.alert(payload1, "Prototype pollution via __proto__ in JSON body. " +
+                            "Injected property [bold]" + canary + "[/bold] persists on subsequent requests.");
+                        continue;
+                    }
+                }
+            }
+
+            // Test 2: constructor.prototype
+            var payload2 = '{"constructor":{"prototype":{"' + canary + '":"polluted"}}}';
+            if (this.requestRaw(this.scheme.path, payload2, "POST")) {
+                if (this.requestRaw(this.scheme.path, '{}', "POST")) {
+                    if (this.lastJob.response.body.indexOf(canary) != -1) {
+                        this.alert(payload2, "Prototype pollution via constructor.prototype in JSON body.");
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Test 3: __proto__ via query parameter (key-value merge)
+        var payload3 = "__proto__[" + canary + "]=polluted";
+        if (this.request(payload3)) {
+            if (this.lastJob.response.body.indexOf(canary) != -1) {
+                this.alert(payload3, "Prototype pollution via __proto__ in query parameter.");
+                continue;
+            }
+        }
+
+        // Test 4: __proto__ via dot notation
+        var payload4 = this.scheme.getInputName(this.inputIndex) + "[__proto__][" + canary + "]=polluted";
+        if (this.request(payload4)) {
+            if (this.lastJob.response.body.indexOf(canary) != -1) {
+                this.alert(payload4, "Prototype pollution via nested __proto__ parameter.");
+                continue;
+            }
+        }
+
+        // Test 5: status code change (pollution affecting isAdmin etc.)
+        var payload5 = '{"__proto__":{"isAdmin":true,"role":"admin","admin":true}}';
+        if (this.requestRaw(this.scheme.path, payload5, "POST")) {
+            var firstStatus = this.lastJob.response.msg2;
+            // make another request and see if behavior changed
+            if (this.requestRaw(this.scheme.path, '{}', "GET")) {
+                if (this.lastJob.response.msg2 != firstStatus &&
+                    (this.lastJob.response.msg2 == 200 || this.lastJob.response.msg2 == 302)) {
+                    this.alert(payload5,
+                        "Prototype pollution may affect authorization. Status changed from " +
+                        firstStatus + " to " + this.lastJob.response.msg2 +
+                        " after injecting isAdmin/role/admin properties.");
+                }
+            }
+        }
+    }
+};
+
+// main
+for (var i = 0; i < scheme.inputCount; i++) {
+    var tester = new classProtoPollution(scheme, i);
+    tester.startTesting();
+    ScriptProgress(ComputeProgress(i, scheme.inputCount));
+    tester = null;
+}

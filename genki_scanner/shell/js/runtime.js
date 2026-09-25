@@ -176,6 +176,19 @@ function executeScript(scriptPath, scriptsDir, context) {
     if (context.siteTree) {
         bridge.SHELL_STATE.siteTree = context.siteTree;
     }
+    if (context.file) {
+        bridge.SHELL_STATE.currentFile = context.file;
+    }
+    if (context.discoveredFiles) {
+        const fileList = new bridge.TList();
+        for (const f of context.discoveredFiles) {
+            fileList.add(f);
+        }
+        bridge.SHELL_STATE.discoveredFiles = fileList;
+    }
+    if (context.cookies !== undefined) {
+        bridge.SHELL_STATE.cookies = context.cookies;
+    }
 
     const vmContext = vm.createContext(sandbox);
     try {
