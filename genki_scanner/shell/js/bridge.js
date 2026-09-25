@@ -79,6 +79,22 @@ class THTTPRequest {
         }
     }
 
+    headerExists(name) {
+        const key = name.toLowerCase();
+        for (const k of Object.keys(this._job._reqHeaders)) {
+            if (k.toLowerCase() === key) return true;
+        }
+        return false;
+    }
+
+    headerValue(name) {
+        const key = name.toLowerCase();
+        for (const [k, v] of Object.entries(this._job._reqHeaders)) {
+            if (k.toLowerCase() === key) return v;
+        }
+        return '';
+    }
+
     get headersString() {
         let s = '';
         for (const [k, v] of Object.entries(this._job._reqHeaders)) {
@@ -570,7 +586,13 @@ function getServerInfo() {
 }
 
 function getSiteRoot(flags) {
-    if (SHELL_STATE.siteTree) return SHELL_STATE.siteTree;
+    if (SHELL_STATE.siteTree) {
+        const tree = SHELL_STATE.siteTree;
+        if (typeof tree.getFirstChild !== 'function') {
+            return makeSiteFile(tree);
+        }
+        return tree;
+    }
     return makeSiteFile({
         path: '/', Name: '', name: '', fullPath: '/',
         isDir: true, isFile: false,
@@ -883,6 +905,10 @@ function terminate() {
     throw new Error('__terminate__');
 }
 
+function ScriptAbort() {
+    throw new Error('__terminate__');
+}
+
 // ---- Output helper ----
 function _output(type, data) {
     const msg = JSON.stringify({ type, data }) + '\n';
@@ -897,7 +923,7 @@ module.exports = {
     getGlobalValue, setGlobalValue,
     getCurrentScheme, getCurrentDirectory, getCurrentFile, getServerInfo, getNewFiles, getCookies, setCookies,
     getSiteRoot, getHTTPWorker,
-    getSiteFileWithPath, makeSiteFile, terminate,
+    getSiteFileWithPath, makeSiteFile, terminate, ScriptAbort,
     addStoredInjectionEntry, getStoredInjectionList,
     addHTTPJobToCrawler, addHTTPRequestToCrawler, addLinkToCrawler, getHostByName, random,
     Plain2SHA1, Plain2MD5, plain2md5, getFileName, getFileExt,

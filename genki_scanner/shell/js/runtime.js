@@ -71,6 +71,7 @@ function buildSandbox() {
         alert2: bridge.alert2,
         getSiteFileWithPath: bridge.getSiteFileWithPath,
         terminate: bridge.terminate,
+        ScriptAbort: bridge.ScriptAbort,
 
         // JS builtins - only add what VM contexts don't provide natively
         Buffer: Buffer,
