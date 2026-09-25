@@ -623,10 +623,16 @@ class ShellOrchestrator:
         ctx.update(extra)
         return ctx
 
+    @staticmethod
+    def _severity_label(sev):
+        if isinstance(sev, int):
+            return ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"][min(sev, 4)]
+        return str(sev).upper()
+
     def _on_script_event(self, event_type, data):
         if event_type == "finding":
             self.all_findings.append(data)
-            sev = data.get("severity", "info").upper()
+            sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
             print(f"    [!] [{sev}] {name}")
             details = data.get("details", "")
@@ -948,7 +954,7 @@ class ShellOrchestrator:
         """Event handler for silent mode -- still collect findings."""
         if event_type == "finding":
             self.all_findings.append(data)
-            sev = data.get("severity", "info").upper()
+            sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
             print(f"\n    [!] [{sev}] {name}")
         elif event_type == "error":
