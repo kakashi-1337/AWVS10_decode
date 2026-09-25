@@ -1,0 +1,265 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// CodeIgniter Debug Mode, Known CVEs, Session Manipulation, Config Exposure
+
+function testCIDebugMode() {
+    // Force error to detect CI debug output
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/index.php/nonexistent_controller_" + Math.floor(Math.random() * 99999);
+    job.execute();
+
+    if (!job.wasError) {
+        var body = job.response.body;
+        if (body.indexOf("CodeIgniter") != -1 || body.indexOf("ci_session") != -1 ||
+            body.indexOf("A PHP Error was encountered") != -1 ||
+            body.indexOf("application/views") != -1 ||
+            body.indexOf("system/core") != -1 ||
+            body.indexOf("BASEPATH") != -1 ||
+            body.indexOf("APPPATH") != -1) {
+
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/CodeIgniter";
+            ri.name = "CodeIgniter Debug Mode / Error Disclosure";
+            ri.severity = 2;
+            ri.setHttpInfo(job);
+            ri.details = "CodeIgniter application exposes debug error messages.[break]" +
+                "Error pages reveal: file paths, framework version, class names, and internal structure.";
+            AddReportItem(ri);
+        }
+    }
+
+    // CI4 debug toolbar
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/";
+    job2.execute();
+
+    if (!job2.wasError && job2.response.msg2 == 200) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("debug-bar") != -1 || body2.indexOf("debugbar") != -1 ||
+            body2.indexOf("ci-icon") != -1 || body2.indexOf("ciDebugBar") != -1) {
+
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/CodeIgniter";
+            ri.name = "CodeIgniter 4 Debug Toolbar Enabled";
+            ri.severity = 3;
+            ri.setHttpInfo(job2);
+            ri.details = "CI4 Debug Toolbar is active in production.[break]" +
+                "Exposes: database queries, route info, session data, loaded files, memory/timing.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testCISessionDeserialization() {
+    // CI3 session cookie deserialization (pre-3.0 used serialize/unserialize)
+    // Check for ci_session cookie format
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 == 200) {
+        var setCookie = job.response.headerValue("Set-Cookie");
+        if (setCookie && setCookie.indexOf("ci_session") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/CodeIgniter";
+            ri.name = "CodeIgniter Session Cookie Detected";
+            ri.severity = 1;
+            ri.setHttpInfo(job);
+            ri.details = "CodeIgniter ci_session cookie detected.[break]" +
+                "CI3 < 3.0 uses PHP serialize() for session data in cookies.[break]" +
+                "If encryption_key is weak or leaked, session forgery and object injection are possible.[break]" +
+                "Cookie value: " + setCookie.substring(0, 200);
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testCIConfigExposure() {
+    var configPaths = [
+        { path: "/application/config/config.php", desc: "main configuration" },
+        { path: "/application/config/database.php", desc: "database credentials" },
+        { path: "/application/config/autoload.php", desc: "autoload configuration" },
+        { path: "/application/config/routes.php", desc: "routing configuration" },
+        { path: "/application/config/email.php", desc: "email/SMTP credentials" },
+        { path: "/app/Config/App.php", desc: "CI4 app configuration" },
+        { path: "/app/Config/Database.php", desc: "CI4 database configuration" },
+        { path: "/app/Config/Email.php", desc: "CI4 email configuration" },
+        { path: "/.env", desc: "CI4 environment file" },
+        { path: "/env", desc: "CI4 env template" },
+        { path: "/writable/logs/", desc: "CI4 log directory" },
+        { path: "/application/logs/", desc: "CI3 log directory" },
+        { path: "/application/logs/log-" + new Date().toISOString().substring(0, 10) + ".php", desc: "today's log" },
+        { path: "/system/core/CodeIgniter.php", desc: "framework core" },
+        { path: "/composer.json", desc: "dependencies" },
+        { path: "/user_guide/", desc: "CI user guide" },
+        { path: "/phpmyadmin/", desc: "phpMyAdmin" },
+        { path: "/adminer.php", desc: "Adminer DB tool" },
+    ];
+
+    for (var i = 0; i < configPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = configPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isSensitive = false;
+            var severity = 2;
+
+            if (body.indexOf("<?php") != -1 && (body.indexOf("$config") != -1 || body.indexOf("$db") != -1)) {
+                isSensitive = true;
+                severity = 4;
+            }
+            if (body.indexOf("encryption_key") != -1 || body.indexOf("DB_PASSWORD") != -1 ||
+                body.indexOf("db_password") != -1 || body.indexOf("hostname") != -1 && body.indexOf("username") != -1) {
+                isSensitive = true;
+                severity = 4;
+            }
+            if (configPaths[i].path.indexOf("log") != -1 && (body.indexOf("ERROR") != -1 || body.indexOf("DEBUG") != -1)) {
+                isSensitive = true;
+                severity = 3;
+            }
+            if (configPaths[i].path.indexOf("CodeIgniter.php") != -1 && body.indexOf("class CI") != -1) {
+                isSensitive = true;
+                severity = 2;
+            }
+            if (configPaths[i].path.indexOf("user_guide") != -1 && body.indexOf("CodeIgniter") != -1) {
+                isSensitive = true;
+                severity = 1;
+            }
+
+            if (isSensitive) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = configPaths[i].path;
+                ri.alertPath = "Scripts/CodeIgniter";
+                ri.name = "CodeIgniter Sensitive File Exposed: " + configPaths[i].desc;
+                ri.severity = severity;
+                ri.setHttpInfo(job);
+                ri.details = "Sensitive CodeIgniter file accessible: [bold]" + configPaths[i].path + "[/bold][break]" +
+                    configPaths[i].desc + "[break]" +
+                    (severity == 4 ? "Contains PHP source code with configuration values or credentials." : "");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testCIKnownCVEs() {
+    // CVE-2020-10793 - CI4 session fixation
+    // CVE-2022-24711 - CI4 RCE via Content-Type header
+    // CVE-2022-24712 - CI4 RCE via URI
+
+    // Test CVE-2022-24711: CI4 multipart content-type header parsing
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.verb = "POST";
+    job.postData = "test=1";
+    job.request.addHeader("Content-Type", "multipart/form-data; boundary=----; class 'CodeIgniter");
+    job.execute();
+
+    if (!job.wasError) {
+        var body = job.response.body;
+        if (body.indexOf("CodeIgniter") != -1 && body.indexOf("Error") != -1 ||
+            body.indexOf("boundary") != -1 && body.indexOf("parse") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/CodeIgniter";
+            ri.name = "CodeIgniter 4 Content-Type Parsing Issue (CVE-2022-24711)";
+            ri.severity = 3;
+            ri.setHttpInfo(job);
+            ri.details = "CI4 may be vulnerable to RCE via malformed Content-Type header.[break]" +
+                "CVE-2022-24711 affects CI4 < 4.1.9 - insufficient input validation in multipart parser.";
+            AddReportItem(ri);
+        }
+    }
+
+    // Test double-encoded path traversal (CI3 < 3.0)
+    var traversalPaths = [
+        "/index.php/../../../../etc/passwd",
+        "/index.php/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
+        "/index.php/..%252f..%252f..%252fetc/passwd",
+    ];
+
+    for (var i = 0; i < traversalPaths.length; i++) {
+        var job2 = new THTTPJob();
+        job2.url = targetUrl;
+        job2.URI = traversalPaths[i];
+        job2.execute();
+
+        if (!job2.wasError && job2.response.msg2 == 200) {
+            if (job2.response.body.indexOf("root:") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = traversalPaths[i];
+                ri.alertPath = "Scripts/CodeIgniter";
+                ri.name = "CodeIgniter Path Traversal";
+                ri.severity = 4;
+                ri.setHttpInfo(job2);
+                ri.details = "Path traversal via double-encoding bypasses CodeIgniter URI filtering.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testCIDefaultRoutes() {
+    // CI default controller/method enumeration
+    var defaultRoutes = [
+        "/index.php/welcome",
+        "/index.php/welcome/index",
+        "/welcome",
+        "/index.php/home",
+        "/home",
+        "/index.php/test",
+        "/index.php/example",
+        "/index.php/migrate",
+        "/index.php/migrate/index",
+    ];
+
+    for (var i = 0; i < defaultRoutes.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = defaultRoutes[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("Welcome to CodeIgniter") != -1 || body.indexOf("migration") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = defaultRoutes[i];
+                ri.alertPath = "Scripts/CodeIgniter";
+                ri.name = "CodeIgniter Default/Debug Route Active";
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = "Default CodeIgniter route still accessible: [bold]" + defaultRoutes[i] + "[/bold][break]" +
+                    "This indicates default configuration, possible development deployment.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+testCIDebugMode();
+testCISessionDeserialization();
+testCIConfigExposure();
+testCIKnownCVEs();
+testCIDefaultRoutes();

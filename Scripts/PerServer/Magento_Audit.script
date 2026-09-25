@@ -1,0 +1,218 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Magento - Admin panel, API exposure, known CVEs (Magecart, SQLi, RCE)
+
+function testMagentoDetection() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return false;
+    var body = job.response.body;
+    return (body.indexOf("Magento") != -1 || body.indexOf("Mage.") != -1 ||
+            body.indexOf("/skin/frontend/") != -1 || body.indexOf("/static/frontend/") != -1 ||
+            body.indexOf("mage/cookies") != -1);
+}
+
+function testMagentoAdmin() {
+    var adminPaths = [
+        "/admin", "/admin/", "/administrator/",
+        "/backend/", "/manager/", "/control/",
+        "/magento/admin/", "/store/admin/",
+        "/admin_custom/", "/admin123/",
+    ];
+
+    // check for custom admin path via 404 leak
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/magento_version";
+    job.execute();
+
+    for (var i = 0; i < adminPaths.length; i++) {
+        var job2 = new THTTPJob();
+        job2.url = targetUrl;
+        job2.URI = adminPaths[i];
+        job2.execute();
+
+        if (!job2.wasError && (job2.response.msg2 == 200 || job2.response.msg2 == 302)) {
+            var body = job2.response.body;
+            var location = job2.response.headerValue("Location") || "";
+
+            if (body.indexOf("admin__") != -1 || body.indexOf("adminhtml") != -1 ||
+                body.indexOf("Magento") != -1 || body.indexOf("login-form") != -1 ||
+                location.indexOf("admin") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = adminPaths[i];
+                ri.alertPath = "Scripts/Magento";
+                ri.name = "Magento Admin Panel Found";
+                ri.severity = 1;
+                ri.setHttpInfo(job2);
+                ri.details = "Magento admin panel accessible at [bold]" + adminPaths[i] + "[/bold].[break]" +
+                    "Default credentials: admin/admin123, admin/magento, admin/password123";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testMagentoCVEs() {
+    // CVE-2024-34102 - CosmicSting XXE (Magento 2)
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/rest/V1/guest-carts/test123/estimate-shipping-methods";
+    job.verb = "POST";
+    job.postData = JSON.stringify({
+        "address": {
+            "street": ["123 test"],
+            "city": "test",
+            "region_id": "12",
+            "country_id": "US",
+            "postcode": "99999"
+        }
+    });
+    job.request.addHeader("Content-Type", "application/json");
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 != 404) {
+        var body = job.response.body;
+        if (body.indexOf("shipping") != -1 || body.indexOf("carrier") != -1 ||
+            job.response.msg2 == 200) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/rest/V1/guest-carts/";
+            ri.alertPath = "Scripts/Magento";
+            ri.name = "Magento REST API - Guest Cart Endpoint Accessible";
+            ri.severity = 2;
+            ri.setHttpInfo(job);
+            ri.details = "Magento 2 REST API guest cart endpoint responds to requests.[break]" +
+                "Check for CVE-2024-34102 (CosmicSting XXE) and CVE-2024-2961 (iconv RCE chain).[break]" +
+                "These can chain for unauthenticated RCE via XML external entity + iconv buffer overflow.";
+            AddReportItem(ri);
+        }
+    }
+
+    // CVE-2022-24086 - Magento template injection via checkout
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/rest/V1/guest-carts/test/set-payment-information";
+    job2.verb = "POST";
+    job2.postData = JSON.stringify({
+        "email": "{{var this.getTemplateFilter().filter(\\\"test\\\")}}@test.com",
+        "paymentMethod": { "method": "checkmo" },
+        "billingAddress": {
+            "firstname": "{{var this.getTemplateFilter()}}",
+            "lastname": "test",
+            "street": ["123"],
+            "city": "test",
+            "region_id": 12,
+            "country_id": "US",
+            "postcode": "99999",
+            "telephone": "1234567890"
+        }
+    });
+    job2.request.addHeader("Content-Type", "application/json");
+    job2.execute();
+
+    if (!job2.wasError) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("getTemplateFilter") != -1 || body2.indexOf("Magento") != -1 ||
+            (job2.response.msg2 == 500 && body2.indexOf("template") != -1)) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/rest/V1/guest-carts/";
+            ri.alertPath = "Scripts/Magento";
+            ri.name = "Magento Template Injection (CVE-2022-24086)";
+            ri.severity = 4;
+            ri.setHttpInfo(job2);
+            ri.details = "Magento checkout processes template expressions in email/address fields.[break]" +
+                "CVE-2022-24086 allows RCE via Magento template injection in order placement flow.";
+            AddReportItem(ri);
+        }
+    }
+
+    // SUPEE patches / Magento 1 shoplift bug (CVE-2015-1397)
+    var job3 = new THTTPJob();
+    job3.url = targetUrl;
+    job3.URI = "/admin/Cms_Wysiwyg/directive/index/";
+    job3.execute();
+
+    if (!job3.wasError && job3.response.msg2 != 404) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = "/admin/Cms_Wysiwyg/directive/index/";
+        ri.alertPath = "Scripts/Magento";
+        ri.name = "Magento 1 Shoplift Vector (CVE-2015-1397)";
+        ri.severity = 3;
+        ri.setHttpInfo(job3);
+        ri.details = "Magento 1 admin Wysiwyg directive endpoint accessible.[break]" +
+            "CVE-2015-1397 enables SQL injection to create admin accounts and execute arbitrary code.";
+        AddReportItem(ri);
+    }
+}
+
+function testMagentoSensitive() {
+    var paths = [
+        { path: "/app/etc/local.xml", desc: "M1 DB credentials", sev: 4 },
+        { path: "/app/etc/env.php", desc: "M2 environment config", sev: 4 },
+        { path: "/app/etc/config.php", desc: "M2 module config", sev: 2 },
+        { path: "/var/log/system.log", desc: "system log", sev: 3 },
+        { path: "/var/log/debug.log", desc: "debug log", sev: 3 },
+        { path: "/var/log/exception.log", desc: "exception log", sev: 3 },
+        { path: "/var/report/", desc: "error reports", sev: 2 },
+        { path: "/downloader/", desc: "Magento Connect Manager", sev: 3 },
+        { path: "/RELEASE_NOTES.txt", desc: "version disclosure", sev: 1 },
+        { path: "/phpinfo.php", desc: "PHP info page", sev: 3 },
+        { path: "/info.php", desc: "PHP info page", sev: 3 },
+        { path: "/magento_version", desc: "Magento version", sev: 1 },
+        { path: "/errors/local.xml", desc: "error handler config", sev: 2 },
+        { path: "/.git/config", desc: "git config", sev: 3 },
+        { path: "/composer.json", desc: "dependencies", sev: 1 },
+        { path: "/rest/V1/store/storeViews", desc: "store views API", sev: 1 },
+        { path: "/rest/V1/directory/currency", desc: "currency API", sev: 0 },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        if (paths[i].sev == 0) continue;
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var report = false;
+
+            if (paths[i].path.indexOf("local.xml") != -1 && body.indexOf("<connection>") != -1) report = true;
+            if (paths[i].path.indexOf("env.php") != -1 && body.indexOf("db") != -1 && body.indexOf("host") != -1) report = true;
+            if (paths[i].path.indexOf("config.php") != -1 && body.indexOf("modules") != -1) report = true;
+            if (paths[i].path.indexOf("log") != -1 && (body.indexOf("[20") != -1 || body.indexOf("Magento") != -1)) report = true;
+            if (paths[i].path.indexOf("downloader") != -1 && body.indexOf("Magento") != -1) report = true;
+            if (paths[i].path.indexOf("phpinfo") != -1 && body.indexOf("phpinfo()") != -1) report = true;
+            if (paths[i].path.indexOf(".git") != -1 && body.indexOf("[core]") != -1) report = true;
+            if (paths[i].path.indexOf("storeViews") != -1 && body.indexOf("store_id") != -1) report = true;
+
+            if (report) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/Magento";
+                ri.name = "Magento: " + paths[i].desc;
+                ri.severity = paths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "Sensitive Magento path: [bold]" + paths[i].path + "[/bold]";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+if (testMagentoDetection()) {
+    testMagentoAdmin();
+    testMagentoCVEs();
+    testMagentoSensitive();
+}
