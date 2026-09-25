@@ -24,7 +24,16 @@ from ..payloads.xss_payloads import (
     TEMPLATE_EXPECTED,
     DOM_XSS_SOURCES,
     DOM_XSS_SINKS,
+    C2_PAYLOADS,
+    C2_BLIND_PAYLOADS,
+    CSP_BYPASSES,
+    CSP_CSS_EXFIL,
+    MXSS_PAYLOADS,
+    POLYGLOT_PAYLOADS,
+    DOM_CLOBBERING_PAYLOADS,
+    MARKDOWN_XSS,
     rand_token,
+    OOB_DOMAIN,
 )
 
 
@@ -111,6 +120,8 @@ class XSSModule(BaseModule):
 
         self._test_dom_xss(url)
         self._test_template_injection(url, parsed, query_params)
+        self._test_blind_xss(url, parsed, query_params)
+        self._test_polyglot(url, parsed, query_params)
 
     def _build_url(self, parsed, query_params, param_name, payload):
         modified = dict(query_params)
@@ -254,5 +265,34 @@ class XSSModule(BaseModule):
                         payload=payload,
                         evidence=f"Expression {payload} evaluated to {expected}",
                         details=f"Potential engine: {engine}",
+                    ))
+                    return
+
+    def _test_blind_xss(self, url, parsed, query_params):
+        if not query_params:
+            return
+        for param_name in query_params:
+            for payload in C2_BLIND_PAYLOADS:
+                test_url = self._build_url(parsed, query_params, param_name, payload)
+                self.http.get(test_url)
+            self.log(f"  Blind XSS payloads sent for {param_name} (check {OOB_DOMAIN} for callbacks)")
+
+    def _test_polyglot(self, url, parsed, query_params):
+        if not query_params:
+            return
+        for param_name in query_params:
+            for payload in POLYGLOT_PAYLOADS:
+                test_url = self._build_url(parsed, query_params, param_name, payload)
+                resp = self.http.get(test_url)
+                if not resp:
+                    continue
+                if "alert(" in resp.text and "<" in payload and payload[:10] in resp.text:
+                    self.reporter.add(Finding(
+                        vuln_type="Cross-Site Scripting (Polyglot)",
+                        severity="HIGH",
+                        url=url,
+                        parameter=param_name,
+                        payload=payload[:80] + "..." if len(payload) > 80 else payload,
+                        evidence="Polyglot payload reflected with executable context markers",
                     ))
                     return

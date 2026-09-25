@@ -13,7 +13,7 @@ class HostHeaderModule(BaseModule):
     name = "host_header"
     description = "Host Header Injection"
 
-    EVIL_HOST = "evil.genkitest.com"
+    EVIL_HOST = "evil.6u.gg"
 
     def run(self, url: str, params: dict = None):
         self.log(f"Testing: {url}")

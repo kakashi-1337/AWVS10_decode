@@ -17,6 +17,7 @@ from ..modules.crlf import CRLFModule
 from ..modules.host_header import HostHeaderModule
 from ..modules.info_disclosure import InfoDisclosureModule
 from ..modules.ssrf import SSRFModule
+from ..modules.nosqli import NoSQLiModule
 
 
 ALL_MODULES = {
@@ -29,6 +30,7 @@ ALL_MODULES = {
     "host_header": HostHeaderModule,
     "info": InfoDisclosureModule,
     "ssrf": SSRFModule,
+    "nosqli": NoSQLiModule,
 }
 
 

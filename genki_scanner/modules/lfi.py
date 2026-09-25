@@ -1,7 +1,11 @@
 """
 Local File Inclusion / Directory Traversal module.
 Ported from AWVS10: classDirectoryTraversal.inc, classFileInclusion.inc
+Updated 2018-2025: PHP filter chain RCE, sensitive file discovery,
+proc/K8s/cloud cred paths, SSH key detection.
 """
+import re
+import base64
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from .base import BaseModule
@@ -10,9 +14,12 @@ from ..payloads.traversal import (
     UNIX_TRAVERSAL,
     WINDOWS_TRAVERSAL,
     PHP_WRAPPERS,
+    PHP_FILTER_CHAIN_RCE,
     JAVA_TRAVERSAL,
+    ALL_SENSITIVE_FILES,
     detect_traversal_success,
     detect_include_error,
+    detect_sensitive_file,
 )
 
 
@@ -29,7 +36,7 @@ class LFIModule(BaseModule):
             query_params.update({k: [v] for k, v in params.items()})
 
         if not query_params:
-            self.log("No parameters to test")
+            self._test_sensitive_files(url, parsed)
             return
 
         for param_name in query_params:
@@ -73,8 +80,6 @@ class LFIModule(BaseModule):
                     continue
 
                 if "php://filter" in payload and "convert.base64" in payload:
-                    import re
-                    import base64
                     b64_match = re.search(r"[A-Za-z0-9+/]{40,}={0,2}", resp.text)
                     if b64_match:
                         try:
@@ -105,6 +110,54 @@ class LFIModule(BaseModule):
                         details="PHP include/require error triggered, may lead to RCE via log poisoning or wrappers",
                     ))
                     return
+
+            self._test_php_filter_chain(url, parsed, query_params, param_name)
+
+        self._test_sensitive_files(url, parsed)
+
+    def _test_php_filter_chain(self, url, parsed, query_params, param_name):
+        for payload in PHP_FILTER_CHAIN_RCE:
+            test_url = self._build_url(parsed, query_params, param_name, payload)
+            resp = self.http.get(test_url)
+            if not resp:
+                continue
+            if resp.status_code == 200 and len(resp.text) > 0:
+                if "<?php" in resp.text or "PD9waH" in resp.text:
+                    self.reporter.add(Finding(
+                        vuln_type="LFI to RCE (PHP filter chain)",
+                        severity="CRITICAL",
+                        url=url,
+                        parameter=param_name,
+                        payload=payload[:80] + "...",
+                        evidence="PHP filter chain iconv technique produced output",
+                        details="Synacktiv 2022 technique. Full RCE achievable via crafted filter chain.",
+                    ))
+                    return
+
+    def _test_sensitive_files(self, url, parsed):
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        baseline = self.http.get(url)
+        baseline_length = len(baseline.text) if baseline else 0
+        baseline_404 = self.http.get(f"{base_url}/genki_nonexistent_path_test")
+        baseline_404_text = baseline_404.text if baseline_404 else ""
+
+        for path in ALL_SENSITIVE_FILES:
+            test_url = f"{base_url}{path}"
+            resp = self.http.get(test_url)
+            if not resp or resp.status_code not in (200, 403):
+                continue
+
+            if resp.status_code == 200 and resp.text and resp.text != baseline_404_text:
+                found, evidence = detect_sensitive_file(resp.text, path)
+                if found:
+                    self.reporter.add(Finding(
+                        vuln_type="Sensitive File Exposure",
+                        severity="HIGH" if any(k in path for k in [".env", "credentials", "id_rsa", "token", "secret", "heapdump"]) else "MEDIUM",
+                        url=test_url,
+                        payload=path,
+                        evidence=evidence,
+                        details=f"Sensitive file accessible at {path}",
+                    ))
 
     def _build_url(self, parsed, query_params, param_name, payload):
         modified = dict(query_params)

@@ -38,7 +38,7 @@ class CORSModule(BaseModule):
         return acao == origin or acao == "*", acac == "true", acao
 
     def _test_arbitrary_origin(self, url, base_domain):
-        evil = "https://evil.genkitest.com"
+        evil = "https://evil.6u.gg"
         reflected, creds, acao = self._check_cors(url, evil)
         if reflected and creds:
             self.reporter.add(Finding(
@@ -85,7 +85,7 @@ class CORSModule(BaseModule):
             ))
 
     def _test_prefix_bypass(self, url, base_domain):
-        evil = f"https://{base_domain}.evil.com"
+        evil = f"https://{base_domain}.6u.gg"
         reflected, creds, acao = self._check_cors(url, evil)
         if reflected:
             self.reporter.add(Finding(

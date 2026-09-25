@@ -12,7 +12,7 @@ class OpenRedirectModule(BaseModule):
     name = "redirect"
     description = "Open Redirect"
 
-    MARKER = "genkitest.com"
+    MARKER = "6u.gg"
 
     REDIRECT_PARAMS = [
         "url", "redirect", "redirect_url", "redirect_uri", "return",
