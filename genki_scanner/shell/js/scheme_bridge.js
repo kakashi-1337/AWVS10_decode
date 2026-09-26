@@ -33,7 +33,7 @@ class SchemeProxy {
     }
 
     setInputValue(i, value) {
-        if (i < this._inputs.length) {
+        if (i >= 0 && i < this._inputs.length) {
             this._inputs[i].value = String(value);
         }
     }

@@ -219,6 +219,8 @@ class THTTPJob {
             const raw = result.stdout.toString('utf-8');
             this._parseRawResponse(raw);
 
+            _trackCatchall(this.response.body, this.responseStatus);
+
             SHELL_STATE.requestCount++;
 
             const reqHeaderLines = Object.entries(headers).map(([k,v]) => `${k}: ${v}`).join('\r\n');
@@ -471,7 +473,49 @@ const SHELL_STATE = {
     storedInjections: {},
     discoveredFiles: null,
     cookies: '',
+    _catchallTracker: { hashes: {}, sizes: {}, total: 0, signature: null },
 };
+
+function _trackCatchall(body, status) {
+    if (status !== 200 || !body) return;
+    const tracker = SHELL_STATE._catchallTracker;
+    tracker.total++;
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256').update(body).digest('hex');
+    const size = body.length;
+    tracker.hashes[hash] = (tracker.hashes[hash] || 0) + 1;
+    tracker.sizes[size] = (tracker.sizes[size] || 0) + 1;
+
+    if (tracker.total >= 5) {
+        const threshold = tracker.total * 0.5;
+        for (const [h, count] of Object.entries(tracker.hashes)) {
+            if (count >= threshold) {
+                tracker.signature = { type: 'hash', hash: h, size: parseInt(Object.entries(tracker.sizes).sort((a,b) => b[1]-a[1])[0][0]) };
+                return;
+            }
+        }
+        for (const [s, count] of Object.entries(tracker.sizes)) {
+            if (count >= threshold && parseInt(s) > 100) {
+                tracker.signature = { type: 'size', size: parseInt(s), tolerance: Math.max(50, parseInt(s) * 0.05) };
+                return;
+            }
+        }
+    }
+}
+
+function isCatchallResponse(body, status) {
+    if (status !== 200 || !body) return false;
+    const sig = SHELL_STATE._catchallTracker.signature;
+    if (!sig) return false;
+    if (sig.type === 'hash') {
+        const crypto = require('crypto');
+        return crypto.createHash('sha256').update(body).digest('hex') === sig.hash;
+    }
+    if (sig.type === 'size') {
+        return Math.abs(body.length - sig.size) <= sig.tolerance;
+    }
+    return false;
+}
 
 // ---- Global Functions (matching AWVS engine) ----
 
@@ -695,12 +739,12 @@ function random(max) {
 
 function Plain2SHA1(str) {
     const crypto = require('crypto');
-    return crypto.createHash('sha1').update(str).digest('hex');
+    return crypto.createHash('sha1').update(String(str)).digest('hex');
 }
 
 function Plain2MD5(str) {
     const crypto = require('crypto');
-    return crypto.createHash('md5').update(str).digest('hex');
+    return crypto.createHash('md5').update(String(str)).digest('hex');
 }
 
 function getFileName(f) {
@@ -956,6 +1000,6 @@ module.exports = {
     Plain2SHA1, Plain2MD5, plain2md5, getFileName, getFileExt,
     trace, LogError, sleep,
     getParserData, url2plain, plain2url, b642plain, plain2b64, alert2,
-    strFromRawData,
+    strFromRawData, isCatchallResponse,
     _output,
 };

@@ -53,6 +53,7 @@ function buildSandbox() {
         addLinkToCrawler: bridge.addLinkToCrawler,
         getHostByName: bridge.getHostByName,
         strFromRawData: bridge.strFromRawData,
+        isCatchallResponse: bridge.isCatchallResponse,
         TSocket: bridge.TSocket,
         random: bridge.random,
         Plain2SHA1: bridge.Plain2SHA1,
@@ -259,6 +260,7 @@ function handleCommand(cmd) {
         case 'clear_findings': {
             bridge.SHELL_STATE.findings = [];
             bridge.SHELL_STATE.kbase = [];
+            bridge.SHELL_STATE._catchallTracker = { hashes: {}, sizes: {}, total: 0, signature: null };
             output('ack', { action: 'clear_findings' });
             break;
         }

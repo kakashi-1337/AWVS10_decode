@@ -724,106 +724,206 @@ class ShellOrchestrator:
         return open_ports
 
     def _dir_enum(self, target_url, server_info):
-        common_dirs = [
-            ".git/HEAD", ".git/config", ".svn/entries", ".env",
-            ".htaccess", "web.config", "robots.txt", "sitemap.xml",
-            "crossdomain.xml", ".well-known/security.txt",
-            "wp-login.php", "wp-admin/", "wp-json/wp/v2/users",
-            "administrator/", "admin/", "login/", "api/",
-            "graphql", ".DS_Store", "backup/", "old/",
-            "test/", "staging/", "dev/", "debug/",
-            "phpinfo.php", "info.php", "server-status", "server-info",
-            "elmah.axd", "trace.axd",
-            "actuator/health", "actuator/env", "actuator/beans",
-            "swagger-ui.html", "swagger-ui/", "api-docs",
-            "v1/", "v2/", "api/v1/", "api/v2/",
-            ".aws/credentials", "config.json", "config.yml",
-            "docker-compose.yml", "Dockerfile",
-            "package.json", "composer.json", "Gemfile",
-            "wp-config.php.bak", "wp-config.php.old",
-            "database.sql", "dump.sql", "backup.sql",
-            ".vscode/", ".idea/",
-            "cgi-bin/", "scripts/", "includes/",
-        ]
+        wordlist = _build_stack_wordlist(server_info, self._detected_techs)
+        print(f"\n  {C.info('[DIRS]')} Checking {len(wordlist)} paths (stack-tuned)")
 
-        cms = server_info.get("cms", [])
-        if "WordPress" in cms or "WordPress" in server_info.get("technologies", []):
-            common_dirs.extend([
-                "wp-content/debug.log", "wp-content/uploads/",
-                "wp-includes/version.php", "xmlrpc.php",
-                "wp-cron.php", "readme.html", "license.txt",
-                "wp-content/plugins/", "wp-content/themes/",
-            ])
-        if "Drupal" in cms or "Drupal" in server_info.get("technologies", []):
-            common_dirs.extend([
-                "CHANGELOG.txt", "core/CHANGELOG.txt",
-                "sites/default/settings.php",
-                "user/login", "node/1",
-            ])
-        if "Joomla" in cms or "Joomla" in server_info.get("technologies", []):
-            common_dirs.extend([
-                "configuration.php", "htaccess.txt",
-                "language/en-GB/", "README.txt",
-            ])
-
-        print(f"\n  {C.info('[DIRS]')} Checking {len(common_dirs)} paths")
-        found = []
         import requests
-
         base = target_url.rstrip("/")
         delay = self.config.get("delay", 1.0)
+        headers = self.config.get("headers", {})
+        verbose = self.config.get("verbose", False)
 
-        for path in common_dirs:
+        raw_responses = []
+        for path in wordlist:
             try:
                 url = f"{base}/{path}"
                 resp = requests.get(
                     url, timeout=8, verify=False,
-                    allow_redirects=False,
-                    headers=self.config.get("headers", {}),
+                    allow_redirects=False, headers=headers,
                 )
-
-                if resp.status_code in (200, 301, 302, 403):
-                    status = resp.status_code
-                    size = len(resp.content)
-                    body_text = resp.content.decode('utf-8', errors='replace')
-                    if self.soft404 and status == 200 and self.soft404.is_soft_404(status, body_text, url):
-                        if self.config.get("verbose"):
-                            print(f"    {C.dim(f'[SOFT404] {path} (custom 404 page)')}")
-                        continue
-                    if size > 0 and status != 404:
-                        entry = {
-                            "path": path,
-                            "status": status,
-                            "size": size,
-                            "content_type": resp.headers.get("Content-Type", ""),
-                        }
-
-                        sensitive = _check_sensitive(path, body_text, status)
-                        if sensitive:
-                            entry["sensitive"] = True
-                            entry["finding_type"] = sensitive
-                            sev = "high" if sensitive in ("git_exposed", "env_file", "backup_file", "credentials") else "medium"
-                            self._add_finding({
-                                "name": f"Sensitive path: {path}",
-                                "severity": sev,
-                                "affects": url,
-                                "details": f"Status {status}, Size {size}B, Type: {sensitive}",
-                                "phase": "DirEnum",
-                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            })
-                            print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {sensitive}")
-                        elif self.config.get("verbose"):
-                            print(f"    {C.BGRN}[+]{C.RST} {path} ({status}, {size}B)")
-
-                        found.append(entry)
-
+                raw_responses.append((path, url, resp))
                 time.sleep(delay * 0.3)
-
             except Exception:
                 pass
 
-        print(f"    {C.ok('[DONE]')} {C.bold(str(len(found)))} paths found")
+        catchall_sig = _detect_catchall(raw_responses)
+        if catchall_sig:
+            ctype = catchall_sig.get("type", "unknown")
+            csize = catchall_sig.get("size", 0)
+            print(f"    {C.warn('[CATCHALL]')} Detected catch-all response: {ctype} ({csize}B) - filtering false positives")
+
+        found = []
+        git_confirmed = False
+        for path, url, resp in raw_responses:
+            status = resp.status_code
+            if status not in (200, 301, 302, 403):
+                continue
+            size = len(resp.content)
+            body_text = resp.content.decode('utf-8', errors='replace')
+
+            if self.soft404 and status == 200 and self.soft404.is_soft_404(status, body_text, url):
+                if verbose:
+                    print(f"    {C.dim(f'[SOFT404] {path}')}")
+                continue
+
+            if catchall_sig and status == 200 and _matches_catchall(resp, catchall_sig):
+                if verbose:
+                    print(f"    {C.dim(f'[CATCHALL] {path} ({size}B)')}")
+                continue
+
+            result = _validate_finding(path, body_text, status, resp.headers)
+            if not result:
+                if verbose and size > 0:
+                    print(f"    {C.dim(f'[UNVERIFIED] {path} ({status}, {size}B) - no content match')}")
+                continue
+
+            finding_type = result["type"]
+            evidence = result.get("evidence", "")
+            sev = result.get("severity", "medium")
+            entry = {
+                "path": path,
+                "status": status,
+                "size": size,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "finding_type": finding_type,
+                "evidence": evidence[:200],
+            }
+
+            self._add_finding({
+                "name": f"Sensitive path: {path}",
+                "severity": sev,
+                "affects": url,
+                "details": f"Status {status}, Size {size}B, Type: {finding_type}",
+                "evidence": evidence[:500],
+                "phase": "DirEnum",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {finding_type}")
+            if evidence and verbose:
+                print(f"      {C.dim('Evidence: ' + evidence[:120])}")
+            found.append(entry)
+
+            if finding_type == "git_exposed" and ".git/HEAD" in path:
+                git_confirmed = True
+
+        print(f"    {C.ok('[DONE]')} {C.bold(str(len(found)))} verified paths found")
+
+        if git_confirmed:
+            self._git_dump(base, headers, delay)
+
         return found
+
+    def _git_dump(self, base_url, headers, delay):
+        """Auto-download exposed .git repository when confirmed."""
+        import requests
+        git_dir = os.path.join(self._scan_dir or ".", "git_dump")
+        os.makedirs(git_dir, exist_ok=True)
+        print(f"\n  {C.warn('[GIT-DUMP]')} Downloading exposed .git repository...")
+
+        git_files = [
+            "HEAD", "config", "packed-refs", "index",
+            "refs/heads/master", "refs/heads/main", "refs/heads/develop",
+            "refs/remotes/origin/HEAD",
+            "description", "info/exclude", "info/refs",
+            "logs/HEAD", "logs/refs/heads/master", "logs/refs/heads/main",
+            "COMMIT_EDITMSG", "FETCH_HEAD", "ORIG_HEAD",
+        ]
+        downloaded = []
+        refs_to_fetch = []
+
+        for gf in git_files:
+            try:
+                url = f"{base_url}/.git/{gf}"
+                resp = requests.get(url, timeout=8, verify=False,
+                                    allow_redirects=False, headers=headers)
+                if resp.status_code != 200 or len(resp.content) == 0:
+                    continue
+                body = resp.content.decode('utf-8', errors='replace')
+
+                if gf == "HEAD" and "ref:" not in body:
+                    continue
+                if gf == "config" and "[core]" not in body:
+                    continue
+
+                out_path = os.path.join(git_dir, gf.replace("/", os.sep))
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, "wb") as f:
+                    f.write(resp.content)
+                downloaded.append(gf)
+
+                if gf == "HEAD" and body.startswith("ref:"):
+                    ref_path = body.strip().split("ref: ", 1)[1].strip()
+                    refs_to_fetch.append(ref_path)
+                if gf == "packed-refs":
+                    for line in body.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            parts = line.split()
+                            if len(parts) == 2:
+                                refs_to_fetch.append(parts[1])
+
+                time.sleep(delay * 0.3)
+            except Exception:
+                pass
+
+        for ref in refs_to_fetch:
+            if ref in [f"refs/{x}" for x in ["heads/master", "heads/main", "heads/develop", "remotes/origin/HEAD"]]:
+                continue
+            try:
+                url = f"{base_url}/.git/{ref}"
+                resp = requests.get(url, timeout=8, verify=False,
+                                    allow_redirects=False, headers=headers)
+                if resp.status_code == 200 and len(resp.content) > 0:
+                    out_path = os.path.join(git_dir, ref.replace("/", os.sep))
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "wb") as f:
+                        f.write(resp.content)
+                    downloaded.append(ref)
+                time.sleep(delay * 0.3)
+            except Exception:
+                pass
+
+        object_hashes = set()
+        for gf in downloaded:
+            fpath = os.path.join(git_dir, gf.replace("/", os.sep))
+            try:
+                with open(fpath, "r") as f:
+                    content = f.read()
+                for match in re.finditer(r'\b([0-9a-f]{40})\b', content):
+                    object_hashes.add(match.group(1))
+            except Exception:
+                pass
+
+        obj_count = 0
+        for obj_hash in list(object_hashes)[:50]:
+            try:
+                prefix, suffix = obj_hash[:2], obj_hash[2:]
+                url = f"{base_url}/.git/objects/{prefix}/{suffix}"
+                resp = requests.get(url, timeout=8, verify=False,
+                                    allow_redirects=False, headers=headers)
+                if resp.status_code == 200 and len(resp.content) > 0:
+                    out_path = os.path.join(git_dir, "objects", prefix, suffix)
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "wb") as f:
+                        f.write(resp.content)
+                    obj_count += 1
+                time.sleep(delay * 0.3)
+            except Exception:
+                pass
+
+        total = len(downloaded) + obj_count
+        if total > 0:
+            self._add_finding({
+                "name": "Git Repository Downloaded",
+                "severity": "critical",
+                "affects": f"{base_url}/.git/",
+                "details": f"Downloaded {len(downloaded)} git files + {obj_count} objects to {git_dir}",
+                "phase": "DirEnum",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            print(f"    {C.BRED}[CRITICAL]{C.RST} Downloaded {len(downloaded)} files + {obj_count} objects -> {git_dir}")
+        else:
+            print(f"    {C.dim('[GIT-DUMP] No files retrieved (403 or directory listing disabled)')}")
 
     # ---- Site Tree Building (SPA-aware) ----
 
@@ -1775,41 +1875,495 @@ def _get_service_name(port):
     return services.get(port, "unknown")
 
 
-def _check_sensitive(path, body, status):
-    if status == 403:
+STACK_WORDLISTS = {
+    "core": [
+        ".git/HEAD", ".git/config", ".svn/entries", ".env", ".env.local",
+        ".env.production", ".env.development", ".env.backup",
+        ".htaccess", "web.config", "robots.txt", "sitemap.xml",
+        "crossdomain.xml", ".well-known/security.txt",
+        "admin/", "login/", "api/", "graphql",
+        ".DS_Store", "backup/", "old/", "test/", "staging/", "dev/",
+        ".aws/credentials", ".aws/config",
+        "config.json", "config.yml", "config.yaml", "config.xml",
+        "docker-compose.yml", "docker-compose.yaml", "Dockerfile",
+        "database.sql", "dump.sql", "backup.sql", "db.sql",
+        ".vscode/", ".idea/", ".editorconfig",
+        "debug/", "debug.log", "error.log", "access.log",
+        "server-status", "server-info",
+        "cgi-bin/", "scripts/", "includes/",
+        "v1/", "v2/", "api/v1/", "api/v2/",
+        ".well-known/openid-configuration",
+        "favicon.ico", "humans.txt", "security.txt",
+    ],
+    "php": [
+        "phpinfo.php", "info.php", "php.ini", "php-errors.log",
+        "wp-config.php.bak", "wp-config.php.old", "wp-config.php.save",
+        "wp-config.php.swp", "wp-config.php~", "wp-config.txt",
+        "config.php.bak", "config.php.old", "config.inc.php.bak",
+        "settings.php.bak", "local.xml", "local.xml.bak",
+        "adminer.php", "phpmyadmin/", "pma/", "myadmin/",
+        "test.php", "shell.php", "cmd.php", "eval.php",
+        ".htpasswd", ".user.ini", "php_errors.log",
+    ],
+    "wordpress": [
+        "wp-login.php", "wp-admin/", "wp-json/wp/v2/users",
+        "wp-content/debug.log", "wp-content/uploads/",
+        "wp-includes/version.php", "xmlrpc.php",
+        "wp-cron.php", "readme.html", "license.txt",
+        "wp-content/plugins/", "wp-content/themes/",
+        "wp-config.php.bak", "wp-config.php.old",
+        "wp-json/", "wp-admin/install.php",
+        "wp-admin/setup-config.php", "wp-admin/upgrade.php",
+        "wp-content/uploads/wc-logs/",
+        "wp-content/backup-db/", "wp-content/backups/",
+        "wp-includes/certificates/ca-bundle.crt",
+        ".wp-config.php.swp", "wp-config-sample.php",
+    ],
+    "drupal": [
+        "CHANGELOG.txt", "core/CHANGELOG.txt",
+        "sites/default/settings.php", "sites/default/default.settings.php",
+        "user/login", "node/1", "admin/",
+        "core/install.php", "update.php", "install.php",
+        "sites/default/files/", "misc/drupal.js",
+        "core/modules/system/system.info.yml",
+    ],
+    "joomla": [
+        "administrator/", "administrator/manifests/files/joomla.xml",
+        "configuration.php", "htaccess.txt",
+        "language/en-GB/", "README.txt",
+        "configuration.php.bak", "configuration.php.old",
+        "administrator/components/", "plugins/",
+    ],
+    "java": [
+        "actuator/health", "actuator/env", "actuator/beans",
+        "actuator/configprops", "actuator/mappings", "actuator/info",
+        "actuator/metrics", "actuator/loggers", "actuator/threaddump",
+        "actuator/heapdump", "actuator/jolokia",
+        "swagger-ui.html", "swagger-ui/", "swagger-ui/index.html",
+        "api-docs", "v2/api-docs", "v3/api-docs",
+        "swagger-resources/", "webjars/",
+        "WEB-INF/web.xml", "WEB-INF/classes/", "META-INF/MANIFEST.MF",
+        "manager/html", "jmx-console/", "web-console/",
+        "status", "jolokia/", "console/",
+        "solr/admin/", "solr/",
+        "invoker/JMXInvokerServlet",
+    ],
+    ".net": [
+        "web.config", "web.config.bak", "web.config.old",
+        "elmah.axd", "trace.axd", "glimpse.axd",
+        "applicationhost.config",
+        "bin/", "App_Data/", "App_Code/",
+        "global.asax", "default.aspx", "iisstart.htm",
+        "appsettings.json", "appsettings.Development.json",
+        "connectionstrings.config",
+    ],
+    "node.js": [
+        "package.json", "package-lock.json", "yarn.lock",
+        ".npmrc", ".yarnrc", ".nvmrc",
+        "node_modules/", "npm-debug.log",
+        ".env", ".env.local", ".env.development",
+        "config/default.json", "config/production.json",
+        "server.js", "app.js", "index.js",
+        "next.config.js", "nuxt.config.js", "gatsby-config.js",
+        "ecosystem.config.js", "pm2.json",
+        "tsconfig.json", "nest-cli.json",
+    ],
+    "python": [
+        "requirements.txt", "Pipfile", "Pipfile.lock", "setup.py",
+        "manage.py", "wsgi.py", "settings.py",
+        "config.py", "config.cfg", "instance/config.py",
+        "app.py", "application.py", "main.py",
+        ".flaskenv", "celeryconfig.py",
+        "Procfile", "runtime.txt", "uwsgi.ini", "gunicorn.conf.py",
+        "django/settings/", "alembic.ini", "alembic/",
+    ],
+    "ruby": [
+        "Gemfile", "Gemfile.lock", "config/database.yml",
+        "config/secrets.yml", "config/master.key",
+        "config/credentials.yml.enc", "config/initializers/secret_token.rb",
+        "db/schema.rb", "db/seeds.rb",
+        "config/routes.rb", "Rakefile",
+        "config/environment.rb", "config/boot.rb",
+        ".ruby-version", ".ruby-gemset",
+    ],
+    "laravel": [
+        ".env", ".env.backup", ".env.old", ".env.save",
+        "storage/logs/laravel.log", "storage/framework/sessions/",
+        "artisan", "composer.json", "composer.lock",
+        "config/app.php", "config/database.php",
+        "public/storage/", "bootstrap/cache/config.php",
+        "storage/debugbar/", "telescope/",
+        "horizon/", "_debugbar/open",
+    ],
+    "coldfusion": [
+        "CFIDE/administrator/", "CFIDE/adminapi/",
+        "CFIDE/scripts/", "CFIDE/componentutils/",
+        "WEB-INF/web.xml", "crossdomain.xml",
+    ],
+}
+
+_TECH_TO_WORDLIST = {
+    "wordpress": "wordpress", "drupal": "drupal", "joomla": "joomla",
+    "php": "php", "laravel": "laravel", "symfony": "php",
+    "codeigniter": "php", "cakephp": "php", "magento": "php",
+    "java": "java", "spring": "java", "apache tomcat": "java",
+    "jboss": "java", "wildfly": "java", "jetty": "java",
+    "jsp": "java", "jsf": "java", "glassfish": "java",
+    "weblogic": "java", "apache struts": "java",
+    "asp.net": ".net", "iis": ".net",
+    "node.js": "node.js", "express": "node.js", "next.js": "node.js",
+    "nuxt.js": "node.js", "fastify": "node.js", "koa": "node.js",
+    "python": "python", "django": "python", "flask": "python",
+    "tornado": "python", "pyramid": "python",
+    "ruby": "ruby", "ruby on rails": "ruby",
+    "coldfusion": "coldfusion", "adobe coldfusion": "coldfusion", "lucee": "coldfusion",
+}
+
+
+def _build_stack_wordlist(server_info, detected_techs):
+    paths = list(STACK_WORDLISTS["core"])
+    used_lists = set()
+
+    all_techs = set()
+    for key in ("technologies", "cms", "frameworks", "js_frameworks"):
+        for t in server_info.get(key, []):
+            all_techs.add(t.lower())
+    all_techs.update(detected_techs)
+
+    for tech in all_techs:
+        wl_key = _TECH_TO_WORDLIST.get(tech)
+        if wl_key and wl_key not in used_lists:
+            used_lists.add(wl_key)
+            paths.extend(STACK_WORDLISTS.get(wl_key, []))
+
+    seen = set()
+    unique = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _detect_catchall(raw_responses):
+    ok_responses = [(p, u, r) for p, u, r in raw_responses if r.status_code == 200]
+    if len(ok_responses) < 5:
         return None
 
-    p = path.lower()
+    size_counts = {}
+    hash_counts = {}
+    for path, url, resp in ok_responses:
+        size = len(resp.content)
+        body_hash = hashlib.sha256(resp.content).hexdigest()
+        size_counts[size] = size_counts.get(size, 0) + 1
+        hash_counts[body_hash] = hash_counts.get(body_hash, 0) + 1
 
-    if ".git/HEAD" in path and "ref:" in body:
-        return "git_exposed"
-    if ".git/config" in path and "[core]" in body:
-        return "git_exposed"
-    if p == ".env" and ("=" in body and ("DB_" in body or "API_" in body or "SECRET" in body)):
-        return "env_file"
-    if ".svn/entries" in path and body.strip().startswith(("8", "9", "10", "12")):
-        return "svn_exposed"
-    if p.endswith((".bak", ".old", ".orig", ".save", ".swp", ".tmp")):
-        return "backup_file"
-    if p.endswith((".sql",)) and ("CREATE TABLE" in body or "INSERT INTO" in body):
-        return "database_dump"
-    if "phpinfo" in p and "PHP Version" in body:
-        return "phpinfo"
-    if p in ("web.config",) and "<configuration" in body:
-        return "config_file"
-    if "actuator" in p and status == 200:
-        return "spring_actuator"
-    if "swagger" in p and status == 200:
-        return "api_docs"
-    if p == "crossdomain.xml" and '<allow-access-from domain="*"' in body:
-        return "permissive_crossdomain"
-    if ".aws/credentials" in p and "aws_access_key" in body.lower():
-        return "credentials"
-    if "docker-compose" in p and "services:" in body:
-        return "docker_config"
-    if p in ("package.json", "composer.json", "gemfile") and status == 200:
-        return "dependency_file"
-    if "debug.log" in p and status == 200 and len(body) > 100:
-        return "debug_log"
+    threshold = len(ok_responses) * 0.5
+
+    for body_hash, count in hash_counts.items():
+        if count >= threshold:
+            for path, url, resp in ok_responses:
+                if hashlib.sha256(resp.content).hexdigest() == body_hash:
+                    ct = resp.headers.get("Content-Type", "unknown")
+                    return {"type": "hash", "hash": body_hash, "size": len(resp.content), "content_type": ct}
+
+    for size, count in size_counts.items():
+        if count >= threshold and size > 100:
+            return {"type": "size", "size": size, "tolerance": max(50, int(size * 0.05))}
+
+    return None
+
+
+def _matches_catchall(resp, catchall_sig):
+    if not catchall_sig:
+        return False
+    size = len(resp.content)
+    if catchall_sig["type"] == "hash":
+        return hashlib.sha256(resp.content).hexdigest() == catchall_sig["hash"]
+    if catchall_sig["type"] == "size":
+        return abs(size - catchall_sig["size"]) <= catchall_sig.get("tolerance", 50)
+    return False
+
+
+CONTENT_VALIDATORS = {
+    ".git/HEAD": {
+        "require_content": [r"ref:\s+refs/"],
+        "severity": "high", "type": "git_exposed",
+    },
+    ".git/config": {
+        "require_content": [r"\[core\]"],
+        "severity": "high", "type": "git_exposed",
+    },
+    ".svn/entries": {
+        "require_content": [r"^(8|9|10|11|12)\s*$"],
+        "severity": "high", "type": "svn_exposed",
+    },
+    ".env": {
+        "require_any": [r"(?:DB_|API_|SECRET|APP_KEY|AWS_|MAIL_|REDIS_)\w*\s*=", r"^\w+\s*=\s*\S+"],
+        "reject_html": True,
+        "severity": "high", "type": "env_file",
+    },
+    ".env.local": {"inherit": ".env"},
+    ".env.production": {"inherit": ".env"},
+    ".env.development": {"inherit": ".env"},
+    ".env.backup": {"inherit": ".env"},
+    ".htaccess": {
+        "require_content": [r"(?:RewriteEngine|RewriteRule|RewriteCond|AuthType|Require|Options|DirectoryIndex|ErrorDocument)"],
+        "severity": "medium", "type": "config_file",
+    },
+    ".htpasswd": {
+        "require_content": [r"^\w+:\$?\w+\$"],
+        "reject_html": True,
+        "severity": "critical", "type": "credentials",
+    },
+    "web.config": {
+        "require_content": [r"<configuration"],
+        "severity": "medium", "type": "config_file",
+    },
+    "robots.txt": {
+        "require_content": [r"(?:User-agent|Disallow|Allow|Sitemap)\s*:"],
+        "severity": "info", "type": "robots_txt",
+    },
+    "sitemap.xml": {
+        "require_content": [r"<urlset|<sitemapindex"],
+        "severity": "info", "type": "sitemap",
+    },
+    "crossdomain.xml": {
+        "require_content": [r"<cross-domain-policy"],
+        "severity": "medium", "type": "crossdomain",
+        "escalate": {"pattern": r'allow-access-from\s+domain="\*"', "severity": "high", "type": "permissive_crossdomain"},
+    },
+    "phpinfo.php": {
+        "require_content": [r"PHP Version|phpinfo\(\)|PHP Credits"],
+        "severity": "high", "type": "phpinfo",
+    },
+    "info.php": {"inherit": "phpinfo.php"},
+    "package.json": {
+        "require_json": True,
+        "require_keys": ["name", "version", "dependencies", "devDependencies", "scripts"],
+        "reject_html": True,
+        "severity": "low", "type": "dependency_file",
+    },
+    "composer.json": {
+        "require_json": True,
+        "require_keys": ["name", "require", "description", "autoload"],
+        "reject_html": True,
+        "severity": "low", "type": "dependency_file",
+    },
+    "Gemfile": {
+        "require_content": [r"(?:source\s+['\"]|gem\s+['\"])"],
+        "reject_html": True,
+        "severity": "low", "type": "dependency_file",
+    },
+    "Gemfile.lock": {
+        "require_content": [r"(?:GEM|BUNDLED WITH|DEPENDENCIES)"],
+        "reject_html": True,
+        "severity": "low", "type": "dependency_file",
+    },
+    "requirements.txt": {
+        "require_content": [r"^\w[\w.-]*\s*[=><!]"],
+        "reject_html": True,
+        "severity": "low", "type": "dependency_file",
+    },
+    "docker-compose.yml": {
+        "require_content": [r"(?:services:|version:\s)"],
+        "reject_html": True,
+        "severity": "medium", "type": "docker_config",
+    },
+    "docker-compose.yaml": {"inherit": "docker-compose.yml"},
+    "Dockerfile": {
+        "require_content": [r"^FROM\s+\S+"],
+        "reject_html": True,
+        "severity": "medium", "type": "docker_config",
+    },
+    ".aws/credentials": {
+        "require_content": [r"aws_access_key_id|aws_secret_access_key"],
+        "reject_html": True,
+        "severity": "critical", "type": "credentials",
+    },
+    ".aws/config": {
+        "require_content": [r"\[(?:default|profile\s)"],
+        "reject_html": True,
+        "severity": "high", "type": "credentials",
+    },
+    "server-status": {
+        "require_content": [r"Apache Server Status|Server Version:|Total Accesses:"],
+        "severity": "medium", "type": "server_status",
+    },
+    "server-info": {
+        "require_content": [r"Apache Server Information|Module Name"],
+        "severity": "medium", "type": "server_info",
+    },
+    "elmah.axd": {
+        "require_content": [r"Error Log for|ELMAH|Error\s+Log"],
+        "severity": "high", "type": "error_log",
+    },
+    "trace.axd": {
+        "require_content": [r"Application Trace|Request Details|Trace Information"],
+        "severity": "high", "type": "trace_log",
+    },
+}
+
+for _act in ["actuator/health", "actuator/env", "actuator/beans", "actuator/configprops",
+             "actuator/mappings", "actuator/info", "actuator/metrics", "actuator/loggers",
+             "actuator/threaddump", "actuator/heapdump", "actuator/jolokia"]:
+    CONTENT_VALIDATORS[_act] = {
+        "require_json_or": [r'"status"\s*:', r'"beans"\s*:', r'"activeProfiles"\s*:',
+                            r'"systemProperties"\s*:', r'"contexts"\s*:',
+                            r'"propertySources"\s*:', r'"measurements"\s*:'],
+        "reject_html": True,
+        "severity": "critical" if "env" in _act or "heapdump" in _act else "high",
+        "type": "spring_actuator",
+    }
+
+for _sw in ["swagger-ui.html", "swagger-ui/", "swagger-ui/index.html", "api-docs",
+            "v2/api-docs", "v3/api-docs", "swagger-resources/"]:
+    CONTENT_VALIDATORS[_sw] = {
+        "require_any": [r"swagger|openapi|\"info\"\s*:|\"paths\"\s*:|Swagger\s*UI"],
+        "severity": "medium", "type": "api_docs",
+    }
+
+for _sql in ["database.sql", "dump.sql", "backup.sql", "db.sql"]:
+    CONTENT_VALIDATORS[_sql] = {
+        "require_content": [r"(?:CREATE\s+TABLE|INSERT\s+INTO|DROP\s+TABLE|ALTER\s+TABLE|--\s+MySQL|--\s+Dump)"],
+        "reject_html": True,
+        "severity": "critical", "type": "database_dump",
+    }
+
+for _log in ["debug.log", "error.log", "access.log", "php-errors.log", "npm-debug.log",
+             "wp-content/debug.log", "storage/logs/laravel.log"]:
+    CONTENT_VALIDATORS[_log] = {
+        "require_content": [r"\d{4}[-/]\d{2}[-/]\d{2}|\[error\]|\[warning\]|Stack trace|Exception|Traceback"],
+        "reject_html": True,
+        "min_size": 100,
+        "severity": "medium", "type": "debug_log",
+    }
+
+for _bak_ext in [".bak", ".old", ".orig", ".save", ".swp", ".tmp", "~"]:
+    pass
+
+
+_VALIDATORS_LOWER = None
+
+def _get_validators_lower():
+    global _VALIDATORS_LOWER
+    if _VALIDATORS_LOWER is None:
+        _VALIDATORS_LOWER = {k.lower().rstrip("/"): v for k, v in CONTENT_VALIDATORS.items()}
+    return _VALIDATORS_LOWER
+
+def _resolve_validator(path):
+    vmap = _get_validators_lower()
+    p_lower = path.lower().rstrip("/")
+
+    v = vmap.get(p_lower)
+    if v:
+        if "inherit" in v:
+            parent_key = v["inherit"].lower().rstrip("/")
+            parent = vmap.get(parent_key, {})
+            merged = dict(parent)
+            merged.update({k: vv for k, vv in v.items() if k != "inherit"})
+            return merged
+        return v
+
+    for key, v in vmap.items():
+        if p_lower.endswith("/" + key) or p_lower == key:
+            result = dict(v)
+            if "inherit" in result:
+                parent_key = result["inherit"].lower().rstrip("/")
+                parent = vmap.get(parent_key, {})
+                merged = dict(parent)
+                merged.update({k: vv for k, vv in result.items() if k != "inherit"})
+                return merged
+            return result
+
+    return None
+
+
+def _validate_finding(path, body, status, headers):
+    if status == 403:
+        return {"type": "forbidden_interesting", "severity": "info",
+                "evidence": f"403 Forbidden on {path}"}
+
+    p_lower = path.lower()
+    is_html = "<html" in body[:500].lower() or "<head" in body[:500].lower() or "<!doctype" in body[:500].lower()
+
+    validator = _resolve_validator(path)
+
+    if validator:
+        if validator.get("reject_html") and is_html and status == 200:
+            return None
+        if validator.get("min_size") and len(body) < validator["min_size"]:
+            return None
+
+        if validator.get("require_json"):
+            try:
+                data = json.loads(body)
+                if isinstance(data, dict):
+                    req_keys = validator.get("require_keys", [])
+                    if req_keys and not any(k in data for k in req_keys):
+                        return None
+                    found_keys = [k for k in req_keys if k in data]
+                    evidence = f"JSON keys: {', '.join(found_keys[:5])}"
+                    return {"type": validator["type"], "severity": validator["severity"], "evidence": evidence}
+            except (json.JSONDecodeError, ValueError):
+                return None
+
+        if validator.get("require_json_or"):
+            if is_html:
+                return None
+            matched = [p for p in validator["require_json_or"] if re.search(p, body[:2000], re.I)]
+            if not matched:
+                return None
+            evidence_match = re.search(matched[0], body[:2000], re.I)
+            evidence = body[max(0, evidence_match.start()-20):evidence_match.end()+50].strip() if evidence_match else ""
+            return {"type": validator["type"], "severity": validator["severity"], "evidence": evidence}
+
+        checks = validator.get("require_content", []) or validator.get("require_any", [])
+        if checks:
+            use_any = "require_any" in validator
+            matches = []
+            for pattern in checks:
+                m = re.search(pattern, body[:5000], re.I | re.M)
+                if m:
+                    matches.append(m)
+                    if use_any:
+                        break
+
+            if use_any and not matches:
+                return None
+            if not use_any and len(matches) < len(checks):
+                return None
+
+            if matches:
+                m = matches[0]
+                start = max(0, m.start() - 20)
+                end = min(len(body), m.end() + 80)
+                evidence = body[start:end].strip()
+            else:
+                evidence = ""
+
+            result = {"type": validator["type"], "severity": validator["severity"], "evidence": evidence}
+            esc = validator.get("escalate")
+            if esc and re.search(esc["pattern"], body[:5000], re.I):
+                result["severity"] = esc["severity"]
+                result["type"] = esc["type"]
+            return result
+
+        return {"type": validator["type"], "severity": validator["severity"], "evidence": ""}
+
+    if p_lower.endswith((".bak", ".old", ".orig", ".save", ".swp", ".tmp")):
+        if is_html and len(body) < 1000:
+            return None
+        if status == 200 and len(body) > 50:
+            base_name = re.sub(r'\.(bak|old|orig|save|swp|tmp)$', '', p_lower)
+            evidence = f"Backup of {base_name}, {len(body)} bytes"
+            return {"type": "backup_file", "severity": "high", "evidence": evidence}
+
+    ct = headers.get("Content-Type", "").lower()
+    if status in (301, 302):
+        loc = headers.get("Location", "")
+        if loc and not any(kw in loc.lower() for kw in ["login", "404", "error", "home", "index"]):
+            return {"type": "redirect_interesting", "severity": "info",
+                    "evidence": f"Redirects to {loc[:120]}"}
 
     return None
