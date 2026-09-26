@@ -1,0 +1,152 @@
+#include constants.inc;
+#include helpers.inc;
+#include os_detection.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+function classSSTI(scheme, inputIndex) {
+    this.scheme = scheme;
+    this.inputIndex = inputIndex;
+    this.variations = scheme.selectVariationsForInput(inputIndex);
+    this.currentVariation = 0;
+    this.foundVulnOnVariation = false;
+    this.lastJob = null;
+}
+
+classSSTI.prototype.request = function(value) {
+    this.scheme.loadVariation(this.variations.item(this.currentVariation));
+    this.scheme.setInputValue(this.inputIndex, value);
+    this.lastJob = new THTTPJob();
+    this.lastJob.url = targetUrl;
+    scheme.populateRequest(this.lastJob);
+    this.lastJob.execute();
+    return (!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003));
+};
+
+classSSTI.prototype.alert = function(testValue, engine, matchedText) {
+    this.foundVulnOnVariation = true;
+    var ri = new TReportItem();
+    ri.LoadFromFile("Expression_Language_Injection.xml");
+    ri.affects = this.scheme.path;
+    ri.alertPath = "Scripts/SSTI";
+    ri.parameter = this.scheme.getInputName(this.inputIndex);
+    ri.parameterValue = testValue;
+    ri.setHttpInfo(this.lastJob);
+    ri.name = "Server-Side Template Injection (" + engine + ")";
+    ri.severity = 3;
+    ri.details = this.scheme.getInputTypeStr(this.inputIndex) +
+        " input [bold][dark]" + this.scheme.getInputName(this.inputIndex) +
+        "[/dark][/bold] was set to [bold][dark]" + testValue + "[/dark][/bold]" +
+        "[break]Template engine: [bold]" + engine + "[/bold]" +
+        "[break]Pattern found: [pre][blue]" + matchedText + "[/blue][/pre]";
+    AddReportItem(ri);
+};
+
+classSSTI.prototype.testReflection = function(payload, expected) {
+    if (!this.request(payload)) return false;
+    var body = this.lastJob.response.body;
+    if (body.indexOf(String(expected)) != -1 && body.indexOf(payload) == -1) {
+        return true;
+    }
+    return false;
+};
+
+classSSTI.prototype.testConfirm = function(payload, notExpected) {
+    if (!this.request(payload)) return false;
+    var body = this.lastJob.response.body;
+    return body.indexOf(String(notExpected)) == -1;
+};
+
+classSSTI.prototype.startTesting = function() {
+    for (var v = 0; v < this.variations.count; v++) {
+        if (this.foundVulnOnVariation) break;
+        this.currentVariation = v;
+        this.scheme.loadVariation(this.variations.item(v));
+
+        var num1 = Math.floor(Math.random() * 900) + 100;
+        var num2 = Math.floor(Math.random() * 900) + 100;
+        var expected = num1 * num2;
+
+        // Jinja2 / Twig / Nunjucks / Django: {{num1*num2}}
+        if (this.testReflection("{{" + num1 + "*" + num2 + "}}", expected)) {
+            // confirm it's real
+            var num3 = Math.floor(Math.random() * 900) + 100;
+            var num4 = Math.floor(Math.random() * 900) + 100;
+            if (this.testReflection("{{" + num3 + "*" + num4 + "}}", num3 * num4)) {
+                this.alert("{{" + num1 + "*" + num2 + "}}", "Jinja2/Twig/Nunjucks", String(expected));
+                continue;
+            }
+        }
+
+        // EJS: <%=num1*num2%>
+        if (this.testReflection("<%=" + num1 + "*" + num2 + "%>", expected)) {
+            var num3 = Math.floor(Math.random() * 900) + 100;
+            var num4 = Math.floor(Math.random() * 900) + 100;
+            if (this.testReflection("<%=" + num3 + "*" + num4 + "%>", num3 * num4)) {
+                this.alert("<%=" + num1 + "*" + num2 + "%>", "EJS/ERB", String(expected));
+                continue;
+            }
+        }
+
+        // Pug/Jade: #{num1*num2}
+        if (this.testReflection("#{" + num1 + "*" + num2 + "}", expected)) {
+            var num3 = Math.floor(Math.random() * 900) + 100;
+            var num4 = Math.floor(Math.random() * 900) + 100;
+            if (this.testReflection("#{" + num3 + "*" + num4 + "}", num3 * num4)) {
+                this.alert("#{" + num1 + "*" + num2 + "}", "Pug/Jade", String(expected));
+                continue;
+            }
+        }
+
+        // Handlebars/Mustache - limited injection via helpers
+        // {{#with "s" as |string|}}{{#with "e"}}{{#with split as |conslist|}}{{this.pop}}{{this.push (lookup string.sub "constructor")}}{{this.pop}}{{/with}}{{/with}}{{/with}}
+        // Start with basic detection: does {{this}} or {{.}} reflect?
+        var canary = "ssti" + Math.floor(Math.random() * 99999);
+        if (this.testReflection("{{#if true}}" + canary + "{{/if}}", canary)) {
+            this.alert("{{#if true}}" + canary + "{{/if}}", "Handlebars/Mustache", canary);
+            continue;
+        }
+
+        // Smarty: {num1*num2}
+        if (this.testReflection("{" + num1 + "*" + num2 + "}", expected)) {
+            if (this.testConfirm("{0*0}", String(expected))) {
+                this.alert("{" + num1 + "*" + num2 + "}", "Smarty", String(expected));
+                continue;
+            }
+        }
+
+        // Freemarker: ${num1*num2}
+        if (this.testReflection("${" + num1 + "*" + num2 + "}", expected)) {
+            var num3 = Math.floor(Math.random() * 900) + 100;
+            var num4 = Math.floor(Math.random() * 900) + 100;
+            if (this.testReflection("${" + num3 + "*" + num4 + "}", num3 * num4)) {
+                this.alert("${" + num1 + "*" + num2 + "}", "Freemarker/Velocity", String(expected));
+                continue;
+            }
+        }
+
+        // Thymeleaf (Spring): __${num1*num2}__
+        if (this.testReflection("__${" + num1 + "*" + num2 + "}__::x", expected)) {
+            this.alert("__${" + num1 + "*" + num2 + "}__::x", "Thymeleaf", String(expected));
+            continue;
+        }
+
+        // Mako: ${num1*num2}
+        // (same as Freemarker but with Python context -- covered above)
+
+        // Tornado: {{num1*num2}} -- covered by Jinja2 test above
+
+        // Slim (Ruby): #{num1*num2} -- covered by Pug test above
+    }
+};
+
+// main
+for (var i = 0; i < scheme.inputCount; i++) {
+    var tester = new classSSTI(scheme, i);
+    tester.startTesting();
+    ScriptProgress(ComputeProgress(i, scheme.inputCount));
+    tester = null;
+}

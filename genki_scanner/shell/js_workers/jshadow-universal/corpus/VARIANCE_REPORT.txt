@@ -1,0 +1,47 @@
+
+════════ CLASSIFICATION PER VARIANT ════════
+variant               │ family            │ conf │ preludes / notable
+──────────────────────────────────────────────────────────────────────────────────────────
+jsfuck                │ jsfuck            │ 0.99 │ jsfuck
+obfio_HIGH_preset     │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch+callController
+obfio_cff             │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_deadcode        │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_debugprotect    │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch+callController
+obfio_default         │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_enc_base64      │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_enc_rc4         │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_mangled_names   │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_nums2expr       │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+obfio_rotate_off      │ obfuscator_io     │ 0.8  │ arrayFn+shiftedFetch
+obfio_selfdefend      │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch+callController
+obfio_split_strings   │ obfuscator_io     │ 0.95 │ arrayFn+rotation+shiftedFetch
+packer                │ packer_pack       │ 0.92 │ 
+
+════════ SIGNATURE STABILITY (across 12 obfuscator.io variants) ════════
+
+🟢 STABLE / INVARIANT (fires in ALL 12 — reliable CORE signatures):
+   prelude:arrayFn  [12/12]
+   prelude:shiftedFetch  [12/12]
+
+🟡 VARIANT-SPECIFIC (fires only in some — DISCRIMINATORS for variant ID):
+   prelude:rotation  [11/12]
+   enc:hex_escape  [10/12]
+   enc:base64_blob  [3/12]
+   enc:custom_base64_alphabet  [3/12]
+   prelude:callController  [3/12]
+   trap:selfdefend_wrapper  [2/12]
+   jscr:string_concealing  [1/12]
+
+════════ VARIANT DISCRIMINATORS (what makes each unique) ════════
+  obfio_HIGH_preset     → features:string_concealing | entropy:obfuscated-likely
+  obfio_cff             → (baseline, no extra markers)
+  obfio_deadcode        → (baseline, no extra markers)
+  obfio_debugprotect    → traps:selfdefend_wrapper
+  obfio_default         → (baseline, no extra markers)
+  obfio_enc_base64      → entropy:obfuscated-likely
+  obfio_enc_rc4         → entropy:obfuscated-likely
+  obfio_mangled_names   → (baseline, no extra markers)
+  obfio_nums2expr       → (baseline, no extra markers)
+  obfio_rotate_off      → NO-rotation
+  obfio_selfdefend      → traps:selfdefend_wrapper
+  obfio_split_strings   → (baseline, no extra markers)

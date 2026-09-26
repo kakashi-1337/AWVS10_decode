@@ -1,0 +1,368 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+function isPythonTarget() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return false;
+    var headers = job.response;
+    var body = job.response.body;
+
+    if (headers.headerValue("server").indexOf("gunicorn") != -1) return true;
+    if (headers.headerValue("server").indexOf("uvicorn") != -1) return true;
+    if (headers.headerValue("server").indexOf("daphne") != -1) return true;
+    if (headers.headerValue("server").indexOf("Werkzeug") != -1) return true;
+    if (headers.headerValue("server").indexOf("waitress") != -1) return true;
+    if (headers.headerValue("server").indexOf("CherryPy") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Django") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Flask") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("FastAPI") != -1) return true;
+
+    var setCookie = headers.headerValue("set-cookie");
+    if (setCookie.indexOf("csrftoken") != -1 || setCookie.indexOf("django") != -1) return true;
+    if (setCookie.indexOf("session=") != -1 && headers.headerValue("server").indexOf("Python") != -1) return true;
+
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/nonexistent_genki_" + Math.random().toString(36).substring(7);
+    job2.execute();
+    if (!job2.wasError) {
+        var errBody = job2.response.body;
+        if (errBody.indexOf("Django") != -1) return true;
+        if (errBody.indexOf("Traceback") != -1 && errBody.indexOf("Python") != -1) return true;
+        if (errBody.indexOf("werkzeug") != -1 || errBody.indexOf("Werkzeug") != -1) return true;
+    }
+    return false;
+}
+
+function testDjangoDebugToolbar() {
+    var paths = [
+        "/__debug__/",
+        "/__debug__/render_panel/",
+        "/__debug__/sql_select/",
+        "/__debug__/sql_explain/",
+        "/__debug__/sql_profile/",
+        "/__debug__/template_source/",
+    ];
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i];
+        job.execute();
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("djdt") != -1 || body.indexOf("debug") != -1 && body.indexOf("panel") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i];
+                ri.alertPath = "Scripts/Python";
+                ri.name = "Django Debug Toolbar Exposed";
+                ri.severity = 3;
+                ri.setHttpInfo(job);
+                ri.details = "Django Debug Toolbar accessible at [bold]" + paths[i] + "[/bold].[break]" +
+                    "Exposes SQL queries, template contexts, settings, request/response data, and profiling info.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testDjangoCVEs() {
+    // CVE-2023-36053 - Django EmailValidator/URLValidator ReDoS
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+    var setCookie = job.response.headerValue("set-cookie");
+    var isDjango = setCookie.indexOf("csrftoken") != -1 || job.response.body.indexOf("csrfmiddlewaretoken") != -1;
+    if (!isDjango) return;
+
+    // CVE-2024-39614 - Django get_supported_language_variant() DoS
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/";
+    job2.request.addHeader("Accept-Language", "a]" + new Array(50).join("-a"));
+    job2.execute();
+    if (!job2.wasError && job2.response.msg2 == 500) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("LookupError") != -1 || body2.indexOf("get_supported_language_variant") != -1 ||
+            body2.indexOf("Traceback") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/Python";
+            ri.name = "Django Language Variant DoS (CVE-2024-39614)";
+            ri.severity = 2;
+            ri.setHttpInfo(job2);
+            ri.details = "Django crashes with malformed Accept-Language header.[break]" +
+                "Affects Django < 4.2.14, < 5.0.7.";
+            AddReportItem(ri);
+        }
+    }
+
+    // CVE-2024-45231 - Django password reset token leak via redirect
+    var job3 = new THTTPJob();
+    job3.url = targetUrl;
+    job3.URI = "/password_reset/";
+    job3.execute();
+    if (!job3.wasError && job3.response.msg2 == 200) {
+        if (job3.response.body.indexOf("csrfmiddlewaretoken") != -1 ||
+            job3.response.body.indexOf("password_reset") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/password_reset/";
+            ri.alertPath = "Scripts/Python";
+            ri.name = "Django Password Reset Page Accessible";
+            ri.severity = 1;
+            ri.setHttpInfo(job3);
+            ri.details = "Django password reset form is accessible.[break]" +
+                "Check for CVE-2024-45231 (token leak via Referer header to 3rd party) on versions < 4.2.16, < 5.0.9.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testFlaskDebugConsole() {
+    var debugPaths = ["/console", "/__debugger__"];
+    for (var i = 0; i < debugPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = debugPaths[i];
+        job.execute();
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("__debugger__") != -1 || body.indexOf("console") != -1 && body.indexOf("werkzeug") != -1 ||
+                body.indexOf("pinauth") != -1 || body.indexOf("debugger") != -1 && body.indexOf("traceback") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = debugPaths[i];
+                ri.alertPath = "Scripts/Python";
+                ri.name = "Flask/Werkzeug Debug Console Exposed (RCE)";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Werkzeug interactive debugger accessible at [bold]" + debugPaths[i] + "[/bold].[break]" +
+                    "If PIN protection is weak or absent, this grants full RCE via Python eval.[break]" +
+                    "PIN can be computed from machine-id + MAC + modname + username.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testFastAPIOpenAPI() {
+    var docPaths = [
+        { path: "/docs", marker: "swagger-ui", name: "Swagger UI" },
+        { path: "/redoc", marker: "redoc", name: "ReDoc" },
+        { path: "/openapi.json", marker: "openapi", name: "OpenAPI Schema" },
+        { path: "/api/docs", marker: "swagger-ui", name: "Swagger UI" },
+        { path: "/api/openapi.json", marker: "openapi", name: "OpenAPI Schema" },
+    ];
+
+    for (var i = 0; i < docPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = docPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(docPaths[i].marker) != -1) {
+                var hasSensitiveEndpoints = body.indexOf("/admin") != -1 || body.indexOf("/users") != -1 ||
+                    body.indexOf("/internal") != -1 || body.indexOf("/debug") != -1 ||
+                    body.indexOf("password") != -1 || body.indexOf("token") != -1;
+
+                var sev = hasSensitiveEndpoints ? 2 : 1;
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = docPaths[i].path;
+                ri.alertPath = "Scripts/Python";
+                ri.name = "FastAPI/OpenAPI Documentation Exposed (" + docPaths[i].name + ")";
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = "API documentation accessible at [bold]" + docPaths[i].path + "[/bold].[break]" +
+                    "Reveals all API endpoints, parameters, request/response models." +
+                    (hasSensitiveEndpoints ? "[break]Contains references to sensitive endpoints." : "");
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testPythonPickleDeserialize() {
+    // check for session cookie that might be pickle-serialized
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    var setCookie = job.response.headerValue("set-cookie");
+    // Flask default session is base64-encoded, check if it's decodable
+    var sessionMatch = setCookie.match(/session=([^;]+)/);
+    if (sessionMatch) {
+        var sessionVal = sessionMatch[1];
+        // flask itsdangerous cookies start with base64 and have dots
+        if (sessionVal.indexOf(".") != -1) {
+            var parts = sessionVal.split(".");
+            if (parts.length >= 2) {
+                // try to detect if it's signed but uses a weak/default key
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = "/";
+                ri.alertPath = "Scripts/Python";
+                ri.name = "Flask Session Cookie Detected";
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = "Flask itsdangerous session cookie found.[break]" +
+                    "If SECRET_KEY is weak or leaked, sessions can be forged/deserialized for RCE.[break]" +
+                    "Cookie: session=" + sessionVal.substring(0, 40) + "...";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testPythonSensitivePaths() {
+    var paths = [
+        { path: "/.env", key: "SECRET_KEY", sev: 4 },
+        { path: "/settings.py", key: "DATABASES", sev: 4 },
+        { path: "/local_settings.py", key: "SECRET_KEY", sev: 4 },
+        { path: "/requirements.txt", key: "==", sev: 1 },
+        { path: "/Pipfile", key: "packages", sev: 1 },
+        { path: "/Pipfile.lock", key: "default", sev: 1 },
+        { path: "/pyproject.toml", key: "dependencies", sev: 1 },
+        { path: "/manage.py", key: "django", sev: 2 },
+        { path: "/wsgi.py", key: "application", sev: 2 },
+        { path: "/asgi.py", key: "application", sev: 2 },
+        { path: "/.flaskenv", key: "FLASK", sev: 3 },
+        { path: "/instance/config.py", key: "SECRET", sev: 4 },
+        { path: "/celeryconfig.py", key: "BROKER", sev: 3 },
+        { path: "/.python-version", key: ".", sev: 0 },
+        { path: "/pytest.ini", key: "pytest", sev: 1 },
+        { path: "/setup.cfg", key: "metadata", sev: 1 },
+        { path: "/alembic.ini", key: "sqlalchemy", sev: 3 },
+        { path: "/app/__init__.py", key: "import", sev: 2 },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        if (paths[i].sev == 0) continue;
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(paths[i].key) != -1 && body.length > 10) {
+                var ct = job.response.headerValue("content-type");
+                if (ct.indexOf("html") != -1 && body.indexOf("<html") != -1 && body.indexOf(paths[i].key) == -1) continue;
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/Python";
+                ri.name = "Python Web App: " + paths[i].path + " Exposed";
+                ri.severity = paths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "Python application file accessible at [bold]" + paths[i].path + "[/bold].";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testSSRFEndpoints() {
+    // common Python webhook/URL fetch endpoints
+    var ssrfPaths = [
+        { path: "/api/webhook", method: "POST" },
+        { path: "/api/fetch", method: "POST" },
+        { path: "/api/proxy", method: "GET" },
+        { path: "/api/url", method: "GET" },
+        { path: "/api/import", method: "POST" },
+    ];
+
+    for (var i = 0; i < ssrfPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = ssrfPaths[i].path;
+        job.verb = ssrfPaths[i].method;
+        if (ssrfPaths[i].method == "POST") {
+            job.request.addHeader("Content-Type", "application/json");
+            job.postData = '{"url":"http://127.0.0.1:80"}';
+        } else {
+            job.URI = ssrfPaths[i].path + "?url=http://127.0.0.1:80";
+        }
+        job.execute();
+        if (!job.wasError && job.response.msg2 != 404 && job.response.msg2 != 405) {
+            var body = job.response.body;
+            if (body.indexOf("<!DOCTYPE") != -1 || body.indexOf("<html") != -1 ||
+                body.indexOf("127.0.0.1") != -1 || body.indexOf("localhost") != -1) {
+                if (body.length > 100) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = ssrfPaths[i].path;
+                    ri.alertPath = "Scripts/Python";
+                    ri.name = "Potential SSRF via URL Fetch Endpoint";
+                    ri.severity = 3;
+                    ri.setHttpInfo(job);
+                    ri.details = "Endpoint [bold]" + ssrfPaths[i].path + "[/bold] accepts URL input and may fetch it server-side.[break]" +
+                        "Test with internal/cloud metadata URLs for SSRF confirmation.";
+                    AddReportItem(ri);
+                }
+            }
+        }
+    }
+}
+
+function testJupyterNotebook() {
+    var jupyterPaths = [
+        { path: "/api", marker: "version" },
+        { path: "/api/kernels", marker: "kernel" },
+        { path: "/api/sessions", marker: "session" },
+        { path: "/tree", marker: "notebook" },
+        { path: "/lab", marker: "jupyter" },
+    ];
+
+    for (var i = 0; i < jupyterPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = jupyterPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(jupyterPaths[i].marker) != -1 &&
+                (body.indexOf("jupyter") != -1 || body.indexOf("notebook") != -1 || body.indexOf("kernel") != -1)) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = jupyterPaths[i].path;
+                ri.alertPath = "Scripts/Python";
+                ri.name = "Jupyter Notebook/Lab Interface Exposed";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Jupyter interface accessible at [bold]" + jupyterPaths[i].path + "[/bold].[break]" +
+                    "If no token/password is set, grants full RCE via kernel execution.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+if (isPythonTarget()) {
+    testDjangoDebugToolbar();
+    testDjangoCVEs();
+    testFlaskDebugConsole();
+    testFastAPIOpenAPI();
+    testPythonPickleDeserialize();
+    testPythonSensitivePaths();
+    testSSRFEndpoints();
+    testJupyterNotebook();
+}
