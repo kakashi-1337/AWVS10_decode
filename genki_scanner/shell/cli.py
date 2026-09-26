@@ -8,6 +8,7 @@ import sys
 import json
 
 from .runner import ShellOrchestrator
+from .colors import BRED, BGRN, CYN, YLW, DIM, RST, BOLD, MAG, RED
 
 
 def find_scripts_dir():
@@ -24,15 +25,15 @@ def find_scripts_dir():
 
 
 def banner():
-    print(r"""
-   ___            _    _   ___ _        _ _
-  / __|___ _ _   | |__(_) / __| |_  ___| | |
- | (_ / -_) ' \  | / /| | \__ \ ' \/ -_) | |
-  \___\___|_||_| |_\_\|_| |___/_||_\___|_|_|
+    print(f"""
+{RED}   ___            _    _   ___ _        _ _{RST}
+{RED}  / __|___ _ _   | |__(_) / __| |_  ___| | |{RST}
+{RED} | (_ / -_) ' \\  | / /| | \\__ \\ ' \\/ -_) | |{RST}
+{RED}  \\___\\___|_||_| |_\\_\\|_| |___/_||_\\___|_|_|{RST}
 
-  v1.0 - AWVS10 Script Runtime Shell
-  Genki Tech Labs / Anbu Black Ops
-  Full Pipeline: Tech ID -> Crawl -> Dir Enum -> Scan -> Report
+  {BOLD}v1.1{RST} {DIM}- AWVS10 Script Runtime Shell{RST}
+  {MAG}Genki Tech Labs{RST} / {RED}Anbu Black Ops{RST}
+  {DIM}Tech ID -> Crawl -> Dir Enum -> Scan -> Report{RST}
 """)
 
 
@@ -131,25 +132,25 @@ def main():
 
     scripts_dir = args.scripts_dir or find_scripts_dir()
     if not scripts_dir:
-        print("[ERROR] Cannot find AWVS10 Scripts directory.")
-        print("        Use --scripts-dir /path/to/Scripts")
+        print(f"{BRED}[ERROR]{RST} Cannot find AWVS10 Scripts directory.")
+        print(f"        Use {BOLD}--scripts-dir /path/to/Scripts{RST}")
         sys.exit(1)
 
-    print(f"[SCRIPTS] {scripts_dir}")
+    print(f"{CYN}[SCRIPTS]{RST} {scripts_dir}")
 
     if args.list_scripts:
         phase_dir = os.path.join(scripts_dir, args.list_scripts)
         if not os.path.isdir(phase_dir):
-            print(f"[ERROR] Phase directory not found: {args.list_scripts}")
+            print(f"{BRED}[ERROR]{RST} Phase directory not found: {args.list_scripts}")
             sys.exit(1)
         scripts = sorted(f for f in os.listdir(phase_dir) if f.endswith(".script"))
-        print(f"\n[{args.list_scripts}] {len(scripts)} scripts:\n")
+        print(f"\n{MAG}[{args.list_scripts}]{RST} {BOLD}{len(scripts)}{RST} scripts:\n")
         for i, s in enumerate(scripts, 1):
-            print(f"  {i:3d}. {s}")
+            print(f"  {DIM}{i:3d}.{RST} {s}")
         return
 
     if not args.url and not args.file:
-        print("[ERROR] Provide -u URL or -f FILE")
+        print(f"{BRED}[ERROR]{RST} Provide {BOLD}-u URL{RST} or {BOLD}-f FILE{RST}")
         sys.exit(1)
 
     urls = []
@@ -157,7 +158,7 @@ def main():
         urls.append(args.url)
     if args.file:
         if not os.path.exists(args.file):
-            print(f"[ERROR] File not found: {args.file}")
+            print(f"{BRED}[ERROR]{RST} File not found: {args.file}")
             sys.exit(1)
         with open(args.file) as fh:
             for line in fh:
@@ -213,10 +214,10 @@ def main():
                 script_path = candidate
                 break
         if not script_path:
-            print(f"[ERROR] Script not found: {args.script}")
+            print(f"{BRED}[ERROR]{RST} Script not found: {args.script}")
             sys.exit(1)
 
-        print(f"[SINGLE] Running {args.script}")
+        print(f"{CYN}[SINGLE]{RST} Running {BOLD}{args.script}{RST}")
         orchestrator.runtime.start()
         orchestrator.runtime.init(scripts_dir, config)
 
@@ -231,7 +232,7 @@ def main():
         )
 
         orchestrator.runtime.stop()
-        print(f"\n[DONE] {len(findings)} findings")
+        print(f"\n{BGRN}[DONE]{RST} {BOLD}{len(findings)}{RST} findings")
 
         if args.output:
             orchestrator.all_findings = findings
@@ -241,7 +242,7 @@ def main():
     try:
         orchestrator.run(urls, phases)
     except KeyboardInterrupt:
-        print("\n[!] Scan interrupted")
+        print(f"\n{YLW}[!] Scan interrupted{RST}")
     finally:
         if args.output and orchestrator.all_findings:
             orchestrator.save_results(args.output)

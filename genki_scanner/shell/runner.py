@@ -28,6 +28,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .tech_detect import detect_technologies, WAF_SIGNATURES
 from .site_tree import SiteTree, Scheme, SiteFile
+from . import colors as C
 
 
 PHASE_ORDER = [
@@ -183,7 +184,7 @@ class NodeRuntime:
         boot = self._read_message()
         if boot and boot.get("type") == "boot":
             if self.verbose:
-                print(f"  [SHELL] Node.js {boot['data'].get('node', '?')} runtime started")
+                print(f"  {C.ok('[SHELL]')} Node.js {C.bold(boot['data'].get('node', '?'))} runtime started")
             return True
         return False
 
@@ -316,11 +317,11 @@ class NodeRuntime:
             if self.verbose:
                 sev = msg["data"].get("severity", "?")
                 name = msg["data"].get("name", "?")
-                print(f"  [FINDING] [{sev.upper()}] {name}")
+                print(f"  {C.BYLW}[FINDING]{C.RST} [{C.sev(sev.upper())}] {name}")
         elif msg["type"] == "error":
-            print(f"  [ERROR] {msg['data'].get('message', '?')}")
+            print(f"  {C.err('[ERROR]')} {msg['data'].get('message', '?')}")
         elif msg["type"] == "trace" and self.verbose:
-            print(f"  [TRACE] {msg['data'].get('message', '')}")
+            print(f"  {C.dim('[TRACE]')} {msg['data'].get('message', '')}")
 
 
 SOFT_404_KEYWORDS = [
@@ -470,7 +471,7 @@ class ShellOrchestrator:
                     continue
                 scripts.append(os.path.join(full_path, f))
         if skipped and self.config.get("verbose"):
-            print(f"    [FILTER] Skipped {skipped} scripts (not applicable to detected stack)")
+            print(f"    {C.dim(f'[FILTER] Skipped {skipped} scripts (not applicable to detected stack)')}")
         return scripts, skipped
 
     # ---- Technology / Server Detection ----
@@ -522,14 +523,14 @@ class ShellOrchestrator:
             info["_body"] = resp.text
 
         except Exception as e:
-            print(f"  [WARN] Server probe failed: {e}")
+            print(f"  {C.warn('[WARN]')} Server probe failed: {e}")
 
         return info
 
     def _port_scan(self, hostname, ports=None):
         ports = ports or COMMON_PORTS
         open_ports = []
-        print(f"\n  [PORTS] Scanning {len(ports)} common ports on {hostname}")
+        print(f"\n  {C.info('[PORTS]')} Scanning {len(ports)} common ports on {C.bold(hostname)}")
 
         for port in ports:
             try:
@@ -539,15 +540,15 @@ class ShellOrchestrator:
                 if result == 0:
                     service = _get_service_name(port)
                     open_ports.append({"port": port, "service": service})
-                    print(f"    [OPEN] {port}/{service}")
+                    print(f"    {C.BGRN}[OPEN]{C.RST} {C.bold(str(port))}/{service}")
                 sock.close()
             except Exception:
                 pass
 
         if not open_ports:
-            print("    [INFO] No additional open ports found")
+            print(f"    {C.dim('[INFO] No additional open ports found')}")
         else:
-            print(f"    [DONE] {len(open_ports)} open ports")
+            print(f"    {C.ok(f'[DONE]')} {C.bold(str(len(open_ports)))} open ports")
 
         return open_ports
 
@@ -594,7 +595,7 @@ class ShellOrchestrator:
                 "language/en-GB/", "README.txt",
             ])
 
-        print(f"\n  [DIRS] Checking {len(common_dirs)} paths")
+        print(f"\n  {C.info('[DIRS]')} Checking {len(common_dirs)} paths")
         found = []
         import requests
 
@@ -615,7 +616,7 @@ class ShellOrchestrator:
                     size = len(resp.content)
                     if self.soft404 and status == 200 and self.soft404.is_soft_404(status, resp.text, url):
                         if self.config.get("verbose"):
-                            print(f"    [SOFT404] {path} (custom 404 page)")
+                            print(f"    {C.dim(f'[SOFT404] {path} (custom 404 page)')}")
                         continue
                     if size > 0 and status != 404:
                         entry = {
@@ -638,9 +639,9 @@ class ShellOrchestrator:
                                 "phase": "DirEnum",
                                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             })
-                            print(f"    [!] [{sev.upper()}] {path} ({status}, {size}B) - {sensitive}")
+                            print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {sensitive}")
                         elif self.config.get("verbose"):
-                            print(f"    [+] {path} ({status}, {size}B)")
+                            print(f"    {C.BGRN}[+]{C.RST} {path} ({status}, {size}B)")
 
                         found.append(entry)
 
@@ -649,7 +650,7 @@ class ShellOrchestrator:
             except Exception:
                 pass
 
-        print(f"    [DONE] {len(found)} paths found")
+        print(f"    {C.ok('[DONE]')} {C.bold(str(len(found)))} paths found")
         return found
 
     # ---- Site Tree Building (SPA-aware) ----
@@ -761,15 +762,15 @@ class ShellOrchestrator:
         """Build site tree from browser crawl data or basic HTTP extraction."""
         if target_url in self.site_trees:
             tree = self.site_trees[target_url]
-            print(f"  [TREE] Browser crawl: {len(tree.all_files)} files, "
-                  f"{len(tree.all_schemes)} schemes, {len(tree.all_directories)} dirs")
+            print(f"  {C.info('[TREE]')} Browser crawl: {C.bold(str(len(tree.all_files)))} files, "
+                  f"{C.bold(str(len(tree.all_schemes)))} schemes, {C.bold(str(len(tree.all_directories)))} dirs")
             return tree
 
         tree = SiteTree(target_url)
         tree.add_url(target_url)
         tree._cookies = ""
 
-        print(f"\n  [TREE] Building site tree from HTTP responses")
+        print(f"\n  {C.info('[TREE]')} Building site tree from HTTP responses")
 
         try:
             import requests as req_lib
@@ -805,7 +806,7 @@ class ShellOrchestrator:
 
             all_api_eps = set(api_endpoints)
             if js_urls:
-                print(f"  [TREE] Scanning {min(len(js_urls), 15)} JS files for API endpoints")
+                print(f"  {C.info('[TREE]')} Scanning {min(len(js_urls), 15)} JS files for API endpoints")
 
             delay = self.config.get("delay", 1.0)
             for js_url in js_urls[:15]:
@@ -837,13 +838,14 @@ class ShellOrchestrator:
                     durl = urljoin(target_url.rstrip('/') + '/', dpath)
                     tree.add_url(durl)
 
-            print(f"  [TREE] {len(tree.all_files)} files, {len(tree.all_schemes)} schemes, "
-                  f"{len(tree.all_directories)} dirs")
+            print(f"  {C.info('[TREE]')} {C.bold(str(len(tree.all_files)))} files, "
+                  f"{C.bold(str(len(tree.all_schemes)))} schemes, "
+                  f"{C.bold(str(len(tree.all_directories)))} dirs")
             if all_api_eps:
-                print(f"  [TREE] {len(all_api_eps)} API endpoints from JS analysis")
+                print(f"  {C.info('[TREE]')} {C.bold(str(len(all_api_eps)))} API endpoints from JS analysis")
 
         except Exception as e:
-            print(f"  [WARN] Site tree extraction failed: {e}")
+            print(f"  {C.warn('[WARN]')} Site tree extraction failed: {e}")
 
         self.site_trees[target_url] = tree
         return tree
@@ -888,12 +890,12 @@ class ShellOrchestrator:
                 return
             sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
-            print(f"    [!] [{sev}] {name}")
+            print(f"    {C.sev_color(sev)}[!] [{sev}]{C.RST} {name}")
             details = data.get("details", "")
             if details:
-                print(f"        {details[:120]}")
+                print(f"        {C.dim(details[:120])}")
         elif event_type == "error":
-            print(f"    [ERR] {data.get('message', '?')}")
+            print(f"    {C.err('[ERR]')} {data.get('message', '?')}")
             self.stats["errors"] += 1
         elif event_type == "progress":
             pass
@@ -901,14 +903,14 @@ class ShellOrchestrator:
     # ---- Main Pipeline ----
 
     def run(self, targets, phases=None, modules=None):
-        print(f"\n{'=' * 60}")
-        print("GENKI SHELL v1.1 - AWVS10 Script Runtime")
-        print("Genki Tech Labs / Anbu Black Ops")
-        print(f"{'=' * 60}")
-        print(f"Targets: {len(targets)}")
-        print(f"Scripts: {self.scripts_dir}")
-        print(f"OOB Domain: {self.oob_domain}")
-        print(f"{'=' * 60}\n")
+        print(f"\n{C.RED}{'=' * 60}{C.RST}")
+        print(f"{C.BOLD}GENKI SHELL v1.1{C.RST} - AWVS10 Script Runtime")
+        print(f"{C.MAG}Genki Tech Labs{C.RST} / {C.RED}Anbu Black Ops{C.RST}")
+        print(f"{C.RED}{'=' * 60}{C.RST}")
+        print(f"Targets: {C.bold(str(len(targets)))}")
+        print(f"Scripts: {C.dim(self.scripts_dir)}")
+        print(f"OOB Domain: {C.CYN}{self.oob_domain}{C.RST}")
+        print(f"{C.RED}{'=' * 60}{C.RST}\n")
 
         self.runtime.start()
         self.runtime.init(self.scripts_dir, self.config)
@@ -925,34 +927,34 @@ class ShellOrchestrator:
         return self.all_findings
 
     def _scan_target(self, target_url, phases=None, modules=None):
-        print(f"\n[TARGET] {target_url}")
-        print("-" * 50)
+        print(f"\n{C.BOLD}[TARGET]{C.RST} {C.CYN}{target_url}{C.RST}")
+        print(f"{C.DIM}{'-' * 50}{C.RST}")
 
         # Phase 0: Technology Detection
-        print("\n  [PHASE 0] Technology Detection")
+        print(f"\n  {C.BMAG}[PHASE 0]{C.RST} Technology Detection")
         server_info = self._detect_server(target_url)
-        print(f"  Server: {server_info.get('banner', 'Unknown')}")
-        print(f"  OS: {server_info.get('platform_os', 'Unknown')}")
+        print(f"  Server: {C.bold(server_info.get('banner', 'Unknown'))}")
+        print(f"  OS: {C.bold(server_info.get('platform_os', 'Unknown'))}")
         if server_info.get("poweredby"):
-            print(f"  Powered: {server_info['poweredby']}")
+            print(f"  Powered: {C.YLW}{server_info['poweredby']}{C.RST}")
         if server_info.get("technologies"):
-            print(f"  Tech: {', '.join(server_info['technologies'])}")
+            print(f"  Tech: {C.CYN}{', '.join(server_info['technologies'])}{C.RST}")
         if server_info.get("waf"):
-            print(f"  WAF: {', '.join(server_info['waf'])}")
+            print(f"  WAF: {C.RED}{', '.join(server_info['waf'])}{C.RST}")
         if server_info.get("cms"):
-            print(f"  CMS: {', '.join(server_info['cms'])}")
+            print(f"  CMS: {C.MAG}{', '.join(server_info['cms'])}{C.RST}")
         if server_info.get("frameworks"):
-            print(f"  Frameworks: {', '.join(server_info['frameworks'])}")
+            print(f"  Frameworks: {C.BLU}{', '.join(server_info['frameworks'])}{C.RST}")
         if server_info.get("js_frameworks"):
-            print(f"  JS Frameworks: {', '.join(server_info['js_frameworks'])}")
+            print(f"  JS Frameworks: {C.YLW}{', '.join(server_info['js_frameworks'])}{C.RST}")
 
         # Build tech filter set from detected stack
         tech_set = self._build_tech_set(server_info)
         if tech_set:
-            print(f"  [FILTER] Script filter active: {', '.join(sorted(tech_set)[:10])}")
+            print(f"  {C.dim(f'[FILTER] Script filter active: ')}{C.CYN}{', '.join(sorted(tech_set)[:10])}{C.RST}")
 
         # Phase 0.3: Soft 404 Calibration
-        print("\n  [SOFT404] Calibrating custom error page detection")
+        print(f"\n  {C.info('[SOFT404]')} Calibrating custom error page detection")
         self.soft404 = Soft404Detector(
             target_url,
             headers=self.config.get("headers", {}),
@@ -960,9 +962,9 @@ class ShellOrchestrator:
         )
         self.soft404.calibrate()
         if self.soft404._fingerprints:
-            print(f"  [SOFT404] {len(self.soft404._fingerprints)} fingerprints captured")
+            print(f"  {C.info('[SOFT404]')} {C.bold(str(len(self.soft404._fingerprints)))} fingerprints captured")
         else:
-            print("  [SOFT404] No custom 404 pages detected (server returns real 404s)")
+            print(f"  {C.info('[SOFT404]')} No custom 404 pages detected {C.dim('(server returns real 404s)')}")
 
         # Phase 0.5: Port Scan
         parsed = urlparse(target_url)
@@ -1010,12 +1012,12 @@ class ShellOrchestrator:
             if target_url in trees:
                 self.site_trees[target_url] = trees[target_url]
                 tree = trees[target_url]
-                print(f"  [CRAWL] {len(tree.all_files)} pages, "
-                      f"{len(tree.all_schemes)} schemes, {len(tree.all_directories)} dirs")
+                print(f"  {C.ok('[CRAWL]')} {C.bold(str(len(tree.all_files)))} pages, "
+                      f"{C.bold(str(len(tree.all_schemes)))} schemes, {C.bold(str(len(tree.all_directories)))} dirs")
         except ImportError:
-            print("  [WARN] Browser module not available (pip install playwright)")
+            print(f"  {C.warn('[WARN]')} Browser module not available (pip install playwright)")
         except Exception as e:
-            print(f"  [WARN] Browser crawl failed: {e}")
+            print(f"  {C.warn('[WARN]')} Browser crawl failed: {e}")
 
     # ---- Phase Execution (per-item iteration) ----
 
@@ -1024,7 +1026,7 @@ class ShellOrchestrator:
         scripts, skipped = self._list_scripts(phase_name, filter_tech=do_filter)
         if not scripts:
             if skipped:
-                print(f"\n  [{phase_name.upper()}] All {skipped} scripts skipped (not applicable to stack)")
+                print(f"\n  {C.dim(f'[{phase_name.upper()}] All {skipped} scripts skipped (not applicable to stack)')}")
             return
 
         self.stats["phases"][phase_name] = {"total": len(scripts), "run": 0, "findings": 0, "skipped": skipped}
@@ -1046,7 +1048,7 @@ class ShellOrchestrator:
 
     def _run_phase_single(self, phase_name, scripts, target_url, server_info, site_tree):
         """Run each script once (PerServer, PostScan, WebApps)."""
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts")
+        print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts")
         context = self._build_context(target_url, server_info, siteTree=site_tree)
         for i, script_path in enumerate(scripts):
             self._execute_one(script_path, context, phase_name, i, len(scripts))
@@ -1070,7 +1072,7 @@ class ShellOrchestrator:
             if isinstance(cookies, list):
                 cookies = '; '.join(f"{c.get('name', '')}={c.get('value', '')}" for c in cookies)
 
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts ({len(discovered)} discovered files)")
+        print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts ({C.bold(str(len(discovered)))} discovered files)")
         context = self._build_context(
             target_url, server_info,
             siteTree=site_tree,
@@ -1083,12 +1085,12 @@ class ShellOrchestrator:
     def _run_phase_per_folder(self, phase_name, scripts, target_url, server_info, site_tree):
         """Run each script per discovered directory."""
         directories = sorted(site_tree.all_directories) if site_tree else ['/']
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(directories)} directories")
+        print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts x {C.bold(str(len(directories)))} directories")
 
         for dir_idx, dir_path in enumerate(directories):
             dir_name = dir_path.rstrip('/').split('/')[-1] or '/'
             if self.config.get("verbose"):
-                print(f"    Dir [{dir_idx+1}/{len(directories)}] {dir_path}")
+                print(f"    {C.dim(f'Dir [{dir_idx+1}/{len(directories)}]')} {dir_path}")
 
             context = self._build_context(
                 target_url, server_info,
@@ -1105,11 +1107,11 @@ class ShellOrchestrator:
 
             dir_new = len(self.all_findings) - dir_findings_before
             if dir_new:
-                print(f"    Dir [{dir_idx+1}/{len(directories)}] {dir_path} -> {dir_new} findings")
+                print(f"    Dir [{dir_idx+1}/{len(directories)}] {dir_path} -> {C.BYLW}{dir_new} findings{C.RST}")
 
         total_run = self.stats["phases"][phase_name]["run"]
         total_findings = self.stats["phases"][phase_name]["findings"]
-        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+        print(f"    {C.ok('[DONE]')} {total_run} executions, {total_findings} findings")
 
     def _run_phase_per_file(self, phase_name, scripts, target_url, server_info, site_tree):
         """Run each script per discovered file."""
@@ -1130,11 +1132,11 @@ class ShellOrchestrator:
                        'Name': os.path.basename(p) or 'index',
                        'name': os.path.basename(p) or 'index'}]
 
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(files)} files")
+        print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts x {C.bold(str(len(files)))} files")
 
         for file_idx, file_ctx in enumerate(files):
             if self.config.get("verbose"):
-                print(f"    File [{file_idx+1}/{len(files)}] {file_ctx['path']}")
+                print(f"    {C.dim(f'File [{file_idx+1}/{len(files)}]')} {file_ctx['path']}")
 
             context = self._build_context(
                 target_url, server_info,
@@ -1151,25 +1153,25 @@ class ShellOrchestrator:
 
             file_new = len(self.all_findings) - file_findings_before
             if file_new:
-                print(f"    File [{file_idx+1}/{len(files)}] {file_ctx['path']} -> {file_new} findings")
+                print(f"    File [{file_idx+1}/{len(files)}] {file_ctx['path']} -> {C.BYLW}{file_new} findings{C.RST}")
 
         total_run = self.stats["phases"][phase_name]["run"]
         total_findings = self.stats["phases"][phase_name]["findings"]
-        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+        print(f"    {C.ok('[DONE]')} {total_run} executions, {total_findings} findings")
 
     def _run_phase_per_scheme(self, phase_name, scripts, target_url, server_info, site_tree):
         """Run each script per discovered input scheme (the real fuzzing)."""
         schemes = site_tree.all_schemes if site_tree else []
         if not schemes:
-            print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x 0 schemes (no inputs discovered)")
+            print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts x {C.dim('0 schemes (no inputs discovered)')}")
             return
 
-        print(f"\n  [{phase_name.upper()}] {len(scripts)} scripts x {len(schemes)} schemes")
+        print(f"\n  {C.BMAG}[{phase_name.upper()}]{C.RST} {C.bold(str(len(scripts)))} scripts x {C.bold(str(len(schemes)))} schemes")
 
         for sch_idx, scheme in enumerate(schemes):
             label = f"{scheme.method} {scheme.path} ({len(scheme.inputs)} inputs)"
             if self.config.get("verbose"):
-                print(f"    Scheme [{sch_idx+1}/{len(schemes)}] {label}")
+                print(f"    {C.DIM}Scheme [{sch_idx+1}/{len(schemes)}] {label}{C.RST}")
 
             context = self._build_context(
                 target_url, server_info,
@@ -1186,11 +1188,11 @@ class ShellOrchestrator:
 
             sch_new = len(self.all_findings) - sch_findings_before
             if sch_new:
-                print(f"    Scheme [{sch_idx+1}/{len(schemes)}] {label} -> {sch_new} findings")
+                print(f"    Scheme [{sch_idx+1}/{len(schemes)}] {label} -> {C.BYLW}{sch_new} findings{C.RST}")
 
         total_run = self.stats["phases"][phase_name]["run"]
         total_findings = self.stats["phases"][phase_name]["findings"]
-        print(f"    [DONE] {total_run} executions, {total_findings} findings")
+        print(f"    {C.ok('[DONE]')} {total_run} executions, {total_findings} findings")
 
     def _execute_one(self, script_path, context, phase_name, idx, total,
                      extra="", silent=False):
@@ -1199,7 +1201,7 @@ class ShellOrchestrator:
 
         if not silent:
             label = f" ({extra})" if extra else ""
-            print(f"    [{idx+1}/{total}] {script_name}{label}", end="", flush=True)
+            print(f"    {C.DIM}[{idx+1}/{total}]{C.RST} {script_name}{label}", end="", flush=True)
 
         findings_before = len(self.all_findings)
         result, findings = self.runtime.execute_script_full(
@@ -1214,14 +1216,14 @@ class ShellOrchestrator:
 
         if not silent:
             if result.get("success"):
-                status = f" [{new_findings} findings]" if new_findings else ""
-                print(f" OK{status}")
+                status = f" [{C.BYLW}{new_findings} findings{C.RST}]" if new_findings else ""
+                print(f" {C.BGRN}OK{C.RST}{status}")
             else:
                 err = result.get("error", "unknown")
                 if "not found" in err.lower() or "include" in err.lower():
-                    print(f" SKIP ({err[:60]})")
+                    print(f" {C.YLW}SKIP{C.RST} {C.DIM}({err[:60]}){C.RST}")
                 else:
-                    print(f" ERR ({err[:60]})")
+                    print(f" {C.BRED}ERR{C.RST} {C.RED}({err[:60]}){C.RST}")
 
         return result, new_findings
 
@@ -1232,19 +1234,21 @@ class ShellOrchestrator:
                 return
             sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
-            print(f"\n    [!] [{sev}] {name}")
+            print(f"\n    {C.BYLW}[!]{C.RST} [{C.sev(sev)}] {name}")
         elif event_type == "error":
             self.stats["errors"] += 1
 
     # ---- Summary & Output ----
 
     def _print_summary(self):
-        print(f"\n{'=' * 60}")
-        print("SCAN SUMMARY")
-        print(f"{'=' * 60}")
-        print(f"Scripts run: {self.stats['scripts_run']}")
-        print(f"Errors: {self.stats['errors']}")
-        print(f"Unique findings: {len(self.all_findings)}")
+        print(f"\n{C.RED}{'=' * 60}{C.RST}")
+        print(f"{C.BOLD}SCAN SUMMARY{C.RST}")
+        print(f"{C.RED}{'=' * 60}{C.RST}")
+        print(f"Scripts run: {C.bold(str(self.stats['scripts_run']))}")
+        errs = self.stats['errors']
+        err_color = C.BGRN if errs == 0 else C.BRED
+        print(f"Errors: {err_color}{errs}{C.RST}")
+        print(f"Unique findings: {C.bold(str(len(self.all_findings)))}")
 
         if self.all_findings:
             by_severity = {}
@@ -1256,15 +1260,15 @@ class ShellOrchestrator:
             for sev in ["critical", "high", "medium", "low", "info"]:
                 count = by_severity.get(sev, 0)
                 if count:
-                    print(f"  {sev.upper()}: {count}")
+                    print(f"  {C.sev(sev.upper())}: {C.bold(str(count))}")
 
-        print(f"\nPhase breakdown:")
+        print(f"\n{C.BOLD}Phase breakdown:{C.RST}")
         for phase, stats in self.stats["phases"].items():
             skipped = stats.get('skipped', 0)
-            skip_str = f", {skipped} skipped" if skipped else ""
-            print(f"  {phase}: {stats['run']}/{stats['total']} scripts, {stats['findings']} findings{skip_str}")
+            skip_str = f", {C.DIM}{skipped} skipped{C.RST}" if skipped else ""
+            print(f"  {C.MAG}{phase}{C.RST}: {stats['run']}/{stats['total']} scripts, {C.BYLW}{stats['findings']}{C.RST} findings{skip_str}")
 
-        print(f"{'=' * 60}\n")
+        print(f"{C.RED}{'=' * 60}{C.RST}\n")
 
     def save_results(self, output_file):
         with open(output_file, "w") as f:
@@ -1273,7 +1277,7 @@ class ShellOrchestrator:
                 "stats": self.stats,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }, f, indent=2)
-        print(f"[SAVED] Results -> {output_file}")
+        print(f"{C.BGRN}[SAVED]{C.RST} Results -> {C.bold(output_file)}")
 
 
 def _get_service_name(port):
