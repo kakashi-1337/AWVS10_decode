@@ -641,6 +641,9 @@ class ShellOrchestrator:
 
         try:
             import requests
+            debug = self.config.get("debug", False)
+            if debug:
+                print(f"  {C.dim('[DEBUG] GET ' + target_url)}")
             resp = requests.get(
                 target_url, timeout=10, verify=False,
                 allow_redirects=True,
@@ -652,6 +655,12 @@ class ShellOrchestrator:
 
             resp_headers = dict(resp.headers)
             cookies_str = resp.headers.get("Set-Cookie", "")
+            if debug:
+                srv = resp_headers.get("Server", "?")
+                ct = resp_headers.get("Content-Type", "?")[:60]
+                print(f"  {C.dim(f'[DEBUG] <- {resp.status_code} | {len(resp.content)}B | Server: {srv} | CT: {ct}')}")
+                for hk, hv in resp_headers.items():
+                    print(f"  {C.dim('[DEBUG]   ' + hk + ': ' + hv[:120])}")
 
             body_text = resp.content.decode('utf-8', errors='replace')
             tech_result = detect_technologies(resp_headers, body_text, cookies_str)
@@ -732,6 +741,7 @@ class ShellOrchestrator:
         delay = self.config.get("delay", 1.0)
         headers = self.config.get("headers", {})
         verbose = self.config.get("verbose", False)
+        debug = self.config.get("debug", False)
 
         raw_responses = []
         blocked_paths = []
@@ -742,6 +752,9 @@ class ShellOrchestrator:
                     url, timeout=8, verify=False,
                     allow_redirects=False, headers=headers,
                 )
+                if debug:
+                    ct = resp.headers.get("Content-Type", "?")[:40]
+                    print(f"    {C.dim(f'[DEBUG] {resp.status_code} {len(resp.content):>6}B {ct:40s} {path}')}")
                 raw_responses.append((path, url, resp))
                 if resp.status_code in (403, 404):
                     blocked_paths.append((path, url, resp))
@@ -1239,6 +1252,7 @@ class ShellOrchestrator:
         return str(sev).upper()
 
     def _on_script_event(self, event_type, data):
+        debug = self.config.get("debug", False)
         if event_type == "finding":
             if not self._add_finding(data):
                 return
@@ -1251,8 +1265,20 @@ class ShellOrchestrator:
             self._log_vuln_http(data)
         elif event_type == "http_log":
             self._log_http(data)
+            if debug:
+                method = data.get("method", "GET")
+                url = data.get("url", "?")
+                status = data.get("status", "?")
+                size = data.get("responseSize", data.get("response_size", "?"))
+                dur = data.get("duration", data.get("elapsed", "?"))
+                print(f"      {C.dim(f'[HTTP] {method} {url[:100]} -> {status} ({size}B, {dur}ms)')}")
         elif event_type == "error":
             print(f"    {C.err('[ERR]')} {data.get('message', '?')}")
+            if debug:
+                stack = data.get("stack", "")
+                if stack:
+                    for line in stack.split("\n")[:5]:
+                        print(f"      {C.dim(line)}")
             self.stats["errors"] += 1
         elif event_type == "progress":
             pass

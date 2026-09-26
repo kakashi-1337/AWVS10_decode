@@ -122,6 +122,10 @@ Examples:
     output_group = parser.add_argument_group("output")
     output_group.add_argument("-o", "--output", help="Save results to JSON file")
     output_group.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    output_group.add_argument(
+        "--debug", action="store_true",
+        help="Debug mode: log all HTTP requests/responses, internal tracing, urllib3 debug",
+    )
 
     return parser.parse_args()
 
@@ -166,11 +170,21 @@ def main():
                 if line and not line.startswith("#"):
                     urls.append(line)
 
+    if args.debug:
+        args.verbose = True
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.DEBUG)
+        logging.getLogger("requests").setLevel(logging.DEBUG)
+        from http.client import HTTPConnection
+        HTTPConnection.debuglevel = 1
+
     config = {
         "delay": args.delay,
         "timeout": args.timeout,
         "proxy": args.proxy,
         "verbose": args.verbose,
+        "debug": getattr(args, "debug", False),
         "headers": {},
         "oob_domain": args.oob_domain,
     }
