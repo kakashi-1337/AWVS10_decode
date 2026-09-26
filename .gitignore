@@ -8,4 +8,5 @@ build/
 *.json
 !package.json
 !genki_scanner/shell/wappalyzer/*.json
+!genki_scanner/shell/js_workers/**/*.json
 scans/

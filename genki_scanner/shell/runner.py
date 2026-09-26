@@ -31,6 +31,24 @@ from .site_tree import SiteTree, Scheme, SiteFile
 from . import colors as C
 from .wappalyzer import detect as wap_detect, categorize as wap_categorize
 
+try:
+    from .smuggler import run_smuggler_scan
+    HAS_SMUGGLER = True
+except ImportError:
+    HAS_SMUGGLER = False
+
+try:
+    from .profundis import ProfundisClient
+    HAS_PROFUNDIS = True
+except ImportError:
+    HAS_PROFUNDIS = False
+
+try:
+    from .iast import TaintTracker, run_iast_scan
+    HAS_IAST = True
+except ImportError:
+    HAS_IAST = False
+
 
 PHASE_ORDER = [
     ("PerServer", "server"),
@@ -629,7 +647,8 @@ class ShellOrchestrator:
             resp_headers = dict(resp.headers)
             cookies_str = resp.headers.get("Set-Cookie", "")
 
-            tech_result = detect_technologies(resp_headers, resp.text, cookies_str)
+            body_text = resp.content.decode('utf-8', errors='replace')
+            tech_result = detect_technologies(resp_headers, body_text, cookies_str)
 
             info["banner"] = resp_headers.get("Server", "")
             info["poweredby"] = resp_headers.get("X-Powered-By", "")
@@ -642,9 +661,9 @@ class ShellOrchestrator:
             info["cdn"] = tech_result.get("cdn", [])
             info["response_headers"] = resp_headers
             info["status_code"] = resp.status_code
-            info["_body"] = resp.text
+            info["_body"] = body_text
 
-            wap_results = wap_detect(resp_headers, resp.text, cookies_str, target_url)
+            wap_results = wap_detect(resp_headers, body_text, cookies_str, target_url)
             wap_groups = wap_categorize(wap_results)
             info["wappalyzer"] = wap_results
             info["wappalyzer_groups"] = wap_groups
@@ -1128,6 +1147,29 @@ class ShellOrchestrator:
         if server_info.get("cms"):
             print(f"  CMS: {C.MAG}{', '.join(server_info['cms'])}{C.RST}")
 
+        # Phase 0.1: WAF Origin IP Discovery (via Profundis)
+        profundis_key = self.config.get("profundis_api_key") or os.environ.get("PROFUNDIS_API_KEY")
+        if server_info.get("waf") and HAS_PROFUNDIS and profundis_key:
+            print(f"\n  {C.BMAG}[PROFUNDIS]{C.RST} Searching origin IPs behind WAF...")
+            try:
+                prof = ProfundisClient(api_key=profundis_key)
+                origin_ips = prof.find_origin_ips(parsed.hostname)
+                if origin_ips:
+                    server_info["origin_ips"] = origin_ips
+                    print(f"  {C.ok('[PROFUNDIS]')} Found {C.bold(str(len(origin_ips)))} candidate origin IPs:")
+                    for ip in origin_ips[:5]:
+                        print(f"    {C.CYN}{ip}{C.RST}")
+                    if len(origin_ips) > 5:
+                        print(f"    {C.dim(f'... and {len(origin_ips) - 5} more')}")
+                else:
+                    print(f"  {C.dim('[PROFUNDIS] No origin IPs discovered')}")
+            except Exception as e:
+                print(f"  {C.warn('[PROFUNDIS]')} Error: {e}")
+        elif server_info.get("waf") and not HAS_PROFUNDIS:
+            pass
+        elif server_info.get("waf") and not profundis_key:
+            print(f"  {C.dim('[PROFUNDIS] Set PROFUNDIS_API_KEY to discover origin IPs behind WAF')}")
+
         # Build tech filter set from detected stack
         tech_set = self._build_tech_set(server_info)
         if tech_set:
@@ -1159,6 +1201,10 @@ class ShellOrchestrator:
         if self.config.get("browser"):
             self._browser_crawl(target_url)
 
+        # Phase 1.1: IAST Taint Tracking + DOM Invader (if browser enabled)
+        if self.config.get("browser") and self.config.get("iast", True) and HAS_IAST:
+            self._run_iast(target_url, server_info)
+
         # Phase 1.5: Directory Enumeration
         if not phases or "dirs" in (phases or []):
             dir_results = self._dir_enum(target_url, server_info)
@@ -1180,6 +1226,102 @@ class ShellOrchestrator:
 
         if "WebApps" in active_phases or not phases:
             self._run_phase("WebApps", "webapps", target_url, server_info, site_tree)
+
+        # Phase 3: HTTP Smuggling / Desync Probes
+        if HAS_SMUGGLER and (not phases or "smuggler" in (phases or [])):
+            self._run_smuggler(target_url, server_info)
+
+    def _run_smuggler(self, target_url, server_info):
+        print(f"\n  {C.BMAG}[PHASE 3]{C.RST} HTTP Smuggling / Desync Probes {C.DIM}(CL.TE, TE.CL, TE.TE, CRLF, CL.0){C.RST}")
+        try:
+            results = run_smuggler_scan(target_url, verbose=self.config.get("verbose", False))
+
+            confirmed = []
+            possible = []
+
+            scanners = results.get("scanners", {})
+            for category, findings in scanners.items():
+                for f in findings:
+                    is_confirmed = getattr(f, "confirmed", False) if hasattr(f, "confirmed") else f.get("confirmed", False)
+                    technique = getattr(f, "technique", "") if hasattr(f, "technique") else f.get("technique", "")
+                    endpoint = getattr(f, "endpoint", target_url) if hasattr(f, "endpoint") else f.get("endpoint", target_url)
+                    detail = getattr(f, "detail", "") if hasattr(f, "detail") else f.get("detail", "")
+                    snippet = getattr(f, "response_snippet", "") if hasattr(f, "response_snippet") else f.get("response_snippet", "")
+                    confidence = getattr(f, "confidence", "low") if hasattr(f, "confidence") else f.get("confidence", "low")
+
+                    if is_confirmed:
+                        confirmed.append(f)
+                        self._add_finding({
+                            "name": f"HTTP Desync: {technique}",
+                            "severity": "High",
+                            "type": "HTTP Request Smuggling",
+                            "affects": endpoint,
+                            "description": detail,
+                            "evidence": snippet[:500],
+                            "confidence": confidence,
+                            "phase": "Smuggler",
+                        })
+                    elif confidence in ("high", "medium"):
+                        possible.append(f)
+
+            if confirmed:
+                print(f"  {C.BRED}[CONFIRMED]{C.RST} {C.bold(str(len(confirmed)))} desync vulnerabilities found!")
+                for c in confirmed:
+                    t = getattr(c, "technique", "") if hasattr(c, "technique") else c.get("technique", "")
+                    e = getattr(c, "endpoint", "") if hasattr(c, "endpoint") else c.get("endpoint", "")
+                    d = getattr(c, "detail", "") if hasattr(c, "detail") else c.get("detail", "")
+                    print(f"    {C.RED}{t}{C.RST} on {e}")
+                    if d:
+                        print(f"      {C.dim(d[:120])}")
+            elif possible:
+                print(f"  {C.YLW}[POSSIBLE]{C.RST} {len(possible)} potential desync indicators")
+                for p in possible[:3]:
+                    t = getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
+                    conf = getattr(p, "confidence", "") if hasattr(p, "confidence") else p.get("confidence", "")
+                    print(f"    {C.YLW}{t}{C.RST} (confidence: {conf})")
+            else:
+                print(f"  {C.dim('[SMUGGLER] No desync detected')}")
+
+        except Exception as e:
+            print(f"  {C.warn('[SMUGGLER]')} Error: {e}")
+
+    def _run_iast(self, target_url, server_info):
+        print(f"\n  {C.BMAG}[PHASE 1.1]{C.RST} IAST Taint Tracking + DOM Invader")
+        try:
+            results = run_iast_scan(target_url, verbose=self.config.get("verbose", False))
+
+            iast_findings = results.get("findings", [])
+            reflections = results.get("reflections", [])
+
+            if reflections:
+                print(f"  {C.ok('[IAST]')} {C.bold(str(len(reflections)))} taint reflections detected")
+                for r in reflections[:5]:
+                    sink = r.get("sink", "?")
+                    source = r.get("source", "?")
+                    ctx = r.get("context", "?")
+                    print(f"    {C.YLW}{source}{C.RST} -> {C.RED}{sink}{C.RST} ({ctx})")
+
+            for f in iast_findings:
+                sev = f.get("severity", "Medium")
+                self._add_finding({
+                    "name": f.get("title", "DOM Taint Flow"),
+                    "severity": sev,
+                    "type": f.get("type", "Client-Side"),
+                    "affects": f.get("url", target_url),
+                    "description": f.get("description", ""),
+                    "evidence": f.get("evidence", "")[:500],
+                    "phase": "IAST",
+                })
+
+            if iast_findings:
+                print(f"  {C.BRED}[IAST]{C.RST} {C.bold(str(len(iast_findings)))} confirmed client-side findings")
+            elif not reflections:
+                print(f"  {C.dim('[IAST] No taint flows detected')}")
+
+        except ImportError:
+            print(f"  {C.warn('[IAST]')} Playwright not available (pip install playwright)")
+        except Exception as e:
+            print(f"  {C.warn('[IAST]')} Error: {e}")
 
     def _browser_crawl(self, target_url):
         try:
