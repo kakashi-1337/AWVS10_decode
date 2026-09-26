@@ -208,7 +208,7 @@ WAF_SIGNATURES = {
     },
     "F5 BIG-IP ASM": {
         "headers": {"server": "big-ip", "x-cnection": ""},
-        "cookies": ["BIGipServer", "TS"],
+        "cookies": ["BIGipServer", "TS0"],
     },
     "Barracuda": {
         "headers": {"server": "barracuda"},
@@ -230,6 +230,23 @@ WAF_SIGNATURES = {
     "Reblaze": {
         "headers": {"server": "reblaze"},
         "cookies": ["rbzid"],
+    },
+    "L7Ammune": {
+        "headers": {"server": "l7ammune"},
+    },
+    "Wallarm": {
+        "headers": {"server": "wallarm", "x-wallarm-waf-check": ""},
+    },
+    "Radware AppWall": {
+        "headers": {"x-sl-compstate": ""},
+        "cookies": ["reese84"],
+    },
+    "DataDome": {
+        "headers": {"x-datadome": ""},
+        "cookies": ["datadome"],
+    },
+    "PerimeterX": {
+        "cookies": ["_px", "_pxhd"],
     },
 }
 
@@ -293,6 +310,8 @@ def detect_technologies(resp_headers, resp_body, cookies_str=""):
         for tech, pattern in TECH_SIGNATURES["meta_generators"].items():
             if pattern in gen_val:
                 _add_tech(result, tech)
+
+    _detect_from_header_heuristics(result, headers_lower, set_cookie)
 
     server_val = headers_lower.get("server", "")
     result["server"] = server_val
@@ -408,8 +427,49 @@ def _infer_server_from_headers(headers_lower):
     return ""
 
 
+def _detect_from_header_heuristics(result, headers_lower, set_cookie):
+    """Detect technologies from header patterns that aren't direct name matches."""
+    expires = headers_lower.get("expires", "")
+    if "thu, 19 nov 1981 08:52:00 gmt" in expires:
+        _add_tech(result, "PHP")
+
+    pragma = headers_lower.get("pragma", "")
+    cache = headers_lower.get("cache-control", "")
+    if ("no-cache" in pragma and "no-store" in cache
+            and "must-revalidate" in cache and "PHP" not in result["technologies"]):
+        if "thu, 19 nov 1981" in expires:
+            _add_tech(result, "PHP")
+
+    if set_cookie:
+        if "phpsessid" in set_cookie:
+            _add_tech(result, "PHP")
+        if "jsessionid" in set_cookie:
+            _add_tech(result, "Java/J2EE")
+        if "asp.net_sessionid" in set_cookie:
+            _add_tech(result, "ASP.NET")
+        if "laravel_session" in set_cookie:
+            _add_tech(result, "Laravel")
+            _add_tech(result, "PHP")
+        if "connect.sid" in set_cookie:
+            _add_tech(result, "Node.js")
+        if "_rails_session" in set_cookie or "rack.session" in set_cookie:
+            _add_tech(result, "Rails")
+        if "csrftoken" in set_cookie and "django" not in str(result):
+            _add_tech(result, "Django")
+
+    xpb = headers_lower.get("x-powered-by", "")
+    if xpb:
+        if "php" in xpb:
+            _add_tech(result, "PHP")
+            ver = re.search(r'php[/\s]*([\d.]+)', xpb)
+            if ver:
+                result.setdefault("_php_version", ver.group(1))
+        if "servlet" in xpb or "jsp" in xpb:
+            _add_tech(result, "Java/J2EE")
+
+
 def _infer_os(server_val, headers_lower):
-    """Infer OS from inferred/detected server name."""
+    """Infer OS from inferred/detected server name and other header clues."""
     s = server_val.lower()
     if any(w in s for w in ("iis", "asp.net", "kestrel")):
         return "Windows"
@@ -421,4 +481,9 @@ def _infer_os(server_val, headers_lower):
     xpb = headers_lower.get("x-powered-by", "")
     if "asp.net" in xpb:
         return "Windows"
+    if "php" in xpb:
+        return "Linux"
+    expires = headers_lower.get("expires", "")
+    if "thu, 19 nov 1981 08:52:00 gmt" in expires:
+        return "Linux"
     return "Unknown"
