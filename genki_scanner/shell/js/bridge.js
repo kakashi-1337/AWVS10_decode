@@ -220,6 +220,20 @@ class THTTPJob {
             this._parseRawResponse(raw);
 
             SHELL_STATE.requestCount++;
+
+            const reqHeaderLines = Object.entries(headers).map(([k,v]) => `${k}: ${v}`).join('\r\n');
+            const rawReq = `${this.verb} ${this.URI || '/'} HTTP/1.1\r\nHost: ${this.host}\r\n${reqHeaderLines}${this._body ? '\r\n\r\n' + this._body : '\r\n'}`;
+            _output('http_log', {
+                id: SHELL_STATE.requestCount,
+                url: url,
+                verb: this.verb,
+                status: this.responseStatus,
+                duration: this.responseDuration,
+                rawRequest: rawReq,
+                rawResponse: raw.substring(0, 32000),
+                timestamp: new Date().toISOString(),
+                script: SHELL_STATE._currentScript || '',
+            });
         } catch (e) {
             this.wasError = true;
             this.responseDuration = Date.now() - start;
@@ -380,12 +394,18 @@ class TReportItem {
     }
 
     setHttpInfo(job) {
+        const reqHeaders = Object.assign({}, SHELL_CONFIG.defaultHeaders || {}, job._reqHeaders || {});
+        const reqHeaderLines = Object.entries(reqHeaders).map(([k,v]) => `${k}: ${v}`).join('\r\n');
+        const rawReq = `${job.verb || 'GET'} ${job.URI || '/'} HTTP/1.1\r\nHost: ${job.host || ''}\r\n${reqHeaderLines}${job._body ? '\r\n\r\n' + job._body : '\r\n'}`;
         this._httpInfo = {
             url: job._buildUrl ? job._buildUrl() : '',
             verb: job.verb || '',
             status: job.responseStatus || 0,
-            requestHeaders: Object.assign({}, job._reqHeaders || {}),
-            responseBody: job.response ? job.response.body.substring(0, 2000) : ''
+            duration: job.responseDuration || 0,
+            requestHeaders: reqHeaders,
+            rawRequest: rawReq,
+            rawResponseHeaders: job.response ? job.response.headersString : '',
+            responseBody: job.response ? job.response.body.substring(0, 32000) : '',
         };
         if (job.request) this.request = job.request.toString();
         if (job.response) {
@@ -441,6 +461,7 @@ const SHELL_STATE = {
     kbase: [],
     globalValues: {},
     requestCount: 0,
+    _currentScript: '',
     siteTree: null,
     currentScheme: null,
     currentDirectory: null,

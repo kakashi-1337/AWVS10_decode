@@ -287,6 +287,9 @@ class NodeRuntime:
             elif msg["type"] == "error":
                 if callback:
                     callback("error", msg["data"])
+            elif msg["type"] == "http_log":
+                if callback:
+                    callback("http_log", msg["data"])
             elif msg["type"] == "trace":
                 if self.verbose and callback:
                     callback("trace", msg["data"])
@@ -430,6 +433,47 @@ class ShellOrchestrator:
         self.soft404 = None
         self.oob_domain = self.config.get("oob_domain", OOB_DOMAIN)
         self._detected_techs = set()
+        self._scan_dir = None
+        self._http_log_fh = None
+        self._vuln_http_log_fh = None
+
+    def _init_scan_dir(self, target_url):
+        parsed = urlparse(target_url)
+        safe_host = re.sub(r'[^\w.-]', '_', parsed.hostname or 'unknown')
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        scan_name = f"{safe_host}_{ts}"
+        self._scan_dir = os.path.join(os.getcwd(), "scans", scan_name)
+        os.makedirs(self._scan_dir, exist_ok=True)
+        self._http_log_fh = open(os.path.join(self._scan_dir, "http_raw.jsonl"), "w")
+        self._vuln_http_log_fh = open(os.path.join(self._scan_dir, "vuln_http_raw.jsonl"), "w")
+        return self._scan_dir
+
+    def _close_logs(self):
+        if self._http_log_fh:
+            self._http_log_fh.close()
+            self._http_log_fh = None
+        if self._vuln_http_log_fh:
+            self._vuln_http_log_fh.close()
+            self._vuln_http_log_fh = None
+
+    def _log_http(self, data):
+        if self._http_log_fh:
+            self._http_log_fh.write(json.dumps(data) + "\n")
+            self._http_log_fh.flush()
+
+    def _log_vuln_http(self, finding_data):
+        if self._vuln_http_log_fh and finding_data.get("httpInfo"):
+            entry = {
+                "finding": finding_data.get("name", ""),
+                "severity": finding_data.get("severity", ""),
+                "affects": finding_data.get("affects", ""),
+                "parameter": finding_data.get("parameter", ""),
+                "parameterValue": finding_data.get("parameterValue", ""),
+                "timestamp": finding_data.get("timestamp", ""),
+                "http": finding_data["httpInfo"],
+            }
+            self._vuln_http_log_fh.write(json.dumps(entry) + "\n")
+            self._vuln_http_log_fh.flush()
 
     def _build_tech_set(self, server_info):
         """Build a lowercase set of all detected technologies for filtering."""
@@ -894,6 +938,9 @@ class ShellOrchestrator:
             details = data.get("details", "")
             if details:
                 print(f"        {C.dim(details[:120])}")
+            self._log_vuln_http(data)
+        elif event_type == "http_log":
+            self._log_http(data)
         elif event_type == "error":
             print(f"    {C.err('[ERR]')} {data.get('message', '?')}")
             self.stats["errors"] += 1
@@ -903,6 +950,11 @@ class ShellOrchestrator:
     # ---- Main Pipeline ----
 
     def run(self, targets, phases=None, modules=None):
+        first_target = targets[0] if targets else "unknown"
+        if not first_target.startswith(("http://", "https://")):
+            first_target = "https://" + first_target
+        scan_dir = self._init_scan_dir(first_target)
+
         print(f"\n{C.RED}{'=' * 60}{C.RST}")
         print(f"{C.BOLD}GENKI SHELL v1.1{C.RST} - AWVS10 Script Runtime")
         print(f"{C.MAG}Genki Tech Labs{C.RST} / {C.RED}Anbu Black Ops{C.RST}")
@@ -910,6 +962,7 @@ class ShellOrchestrator:
         print(f"Targets: {C.bold(str(len(targets)))}")
         print(f"Scripts: {C.dim(self.scripts_dir)}")
         print(f"OOB Domain: {C.CYN}{self.oob_domain}{C.RST}")
+        print(f"Output: {C.CYN}{scan_dir}{C.RST}")
         print(f"{C.RED}{'=' * 60}{C.RST}\n")
 
         self.runtime.start()
@@ -922,8 +975,10 @@ class ShellOrchestrator:
                 self._scan_target(target, phases, modules)
         finally:
             self.runtime.stop()
+            self._close_logs()
 
         self._print_summary()
+        self._auto_save()
         return self.all_findings
 
     def _scan_target(self, target_url, phases=None, modules=None):
@@ -1235,6 +1290,9 @@ class ShellOrchestrator:
             sev = self._severity_label(data.get("severity", 0))
             name = data.get("name", "Unknown")
             print(f"\n    {C.BYLW}[!]{C.RST} [{C.sev(sev)}] {name}")
+            self._log_vuln_http(data)
+        elif event_type == "http_log":
+            self._log_http(data)
         elif event_type == "error":
             self.stats["errors"] += 1
 
@@ -1270,6 +1328,24 @@ class ShellOrchestrator:
 
         print(f"{C.RED}{'=' * 60}{C.RST}\n")
 
+    def _auto_save(self):
+        if not self._scan_dir:
+            return
+        summary_path = os.path.join(self._scan_dir, "summary.json")
+        self.save_results(summary_path)
+        http_path = os.path.join(self._scan_dir, "http_raw.jsonl")
+        vuln_path = os.path.join(self._scan_dir, "vuln_http_raw.jsonl")
+        http_count = 0
+        vuln_count = 0
+        if os.path.exists(http_path):
+            with open(http_path) as fh:
+                http_count = sum(1 for _ in fh)
+        if os.path.exists(vuln_path):
+            with open(vuln_path) as fh:
+                vuln_count = sum(1 for _ in fh)
+        print(f"{C.BGRN}[SAVED]{C.RST} HTTP log -> {C.bold(http_path)} {C.DIM}({http_count} requests){C.RST}")
+        print(f"{C.BGRN}[SAVED]{C.RST} Vuln HTTP -> {C.bold(vuln_path)} {C.DIM}({vuln_count} entries){C.RST}")
+
     def save_results(self, output_file):
         with open(output_file, "w") as f:
             json.dump({
@@ -1277,7 +1353,7 @@ class ShellOrchestrator:
                 "stats": self.stats,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }, f, indent=2)
-        print(f"{C.BGRN}[SAVED]{C.RST} Results -> {C.bold(output_file)}")
+        print(f"{C.BGRN}[SAVED]{C.RST} Summary -> {C.bold(output_file)}")
 
 
 def _get_service_name(port):

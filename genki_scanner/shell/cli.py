@@ -243,6 +243,8 @@ def main():
         orchestrator.run(urls, phases)
     except KeyboardInterrupt:
         print(f"\n{YLW}[!] Scan interrupted{RST}")
+        orchestrator._close_logs()
+        orchestrator._auto_save()
     finally:
         if args.output and orchestrator.all_findings:
             orchestrator.save_results(args.output)

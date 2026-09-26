@@ -197,6 +197,7 @@ function executeScript(scriptPath, scriptsDir, context) {
         bridge.SHELL_STATE.cookies = context.cookies;
     }
 
+    bridge.SHELL_STATE._currentScript = path.basename(scriptPath);
     const vmContext = vm.createContext(sandbox);
     try {
         vm.runInContext(code, vmContext, {
