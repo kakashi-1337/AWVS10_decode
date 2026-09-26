@@ -1,0 +1,424 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+{ // class for IDOR detection
+    function classIDOR(scheme, inputIndex) {
+        this.scheme = scheme;
+        this.inputIndex = inputIndex;
+        this.variations = scheme.selectVariationsForInput(inputIndex);
+        this.currentVariation = 0;
+        this.foundVulnOnVariation = false;
+        this.lastJob = null;
+    }
+
+    classIDOR.prototype.request = function(value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classIDOR.prototype.requestRaw = function(path, body, method, contentType) {
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.URI = path;
+        this.lastJob.verb = method || "GET";
+        if (body) {
+            this.lastJob.postData = body;
+            this.lastJob.request.addHeader("Content-Type", contentType || "application/json");
+        }
+        this.lastJob.execute();
+        return (!this.lastJob.wasError);
+    };
+
+    classIDOR.prototype.alert = function(testValue, details) {
+        this.foundVulnOnVariation = true;
+        var ri = new TReportItem();
+        ri.LoadFromFile("Sql_Injection.xml");
+        ri.affects = this.scheme.path;
+        ri.alertPath = "Scripts/IDOR";
+        ri.parameter = this.scheme.getInputName(this.inputIndex);
+        ri.parameterValue = testValue;
+        ri.setHttpInfo(this.lastJob);
+        ri.name = "Insecure Direct Object Reference (IDOR)";
+        ri.severity = 3;
+        ri.details = details;
+        AddReportItem(ri);
+    };
+
+    classIDOR.prototype.getOrigValue = function() {
+        var value = "";
+        for (var i = 0; i < this.variations.count; i++) {
+            var varValue = this.scheme.getVariation(this.variations.item(i)).item(this.inputIndex);
+            if (value == "" && varValue != "") {
+                value = varValue;
+                break;
+            }
+        }
+        return value;
+    };
+
+    // Strip dynamic content (timestamps, tokens, nonces) for comparison
+    classIDOR.prototype.normalizeBody = function(body) {
+        // Remove timestamps
+        body = body.replace(/([0-1]?[0-9]|[2][0-3]):([0-5][0-9])[.|:]([0-9][0-9])/g, "");
+        body = body.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/g, "");
+        // Remove CSRF tokens and nonces
+        body = body.replace(/[a-f0-9]{32,}/g, "");
+        return body;
+    };
+
+    // Check if a response looks like it contains real object data (not an error/404 page)
+    classIDOR.prototype.isDataResponse = function(status, body) {
+        if (status != 200) return false;
+        if (body.length < 20) return false;
+        // Heuristic: JSON responses with data
+        if (body.indexOf('{') != -1 && body.indexOf('}') != -1) return true;
+        // Heuristic: HTML with content
+        if (body.length > 200) return true;
+        return false;
+    };
+
+    // Check if two bodies contain meaningfully different data
+    classIDOR.prototype.hasDifferentData = function(body1, body2) {
+        var norm1 = this.normalizeBody(body1);
+        var norm2 = this.normalizeBody(body2);
+
+        // Same content after normalization => not different objects
+        if (norm1 == norm2) return false;
+
+        // Require meaningful difference
+        var lengthDiff = Math.abs(norm1.length - norm2.length);
+        // Allow some variance from dynamic content but require substantive difference
+        if (lengthDiff < 10 && norm1.length > 200) {
+            // Check character-level difference in a sample
+            var diffCount = 0;
+            var checkLen = Math.min(norm1.length, norm2.length, 2000);
+            for (var c = 0; c < checkLen; c++) {
+                if (norm1.charAt(c) != norm2.charAt(c)) diffCount++;
+            }
+            // Less than 2% character difference in a large body is likely noise
+            if (diffCount < (checkLen * 0.02)) return false;
+        }
+
+        return true;
+    };
+
+    // ---- Numeric ID enumeration ----
+    classIDOR.prototype.testNumericIDOR = function() {
+        var origValue = this.getOrigValue();
+        var numericOrig = parseInt(origValue, 10);
+
+        // Only test numeric-looking values
+        if (isNaN(numericOrig)) return false;
+        if (origValue != String(numericOrig)) return false;
+
+        // Step 1: Baseline with original ID
+        if (!this.request(origValue)) return false;
+        var origStatus = this.lastJob.response.msg2;
+        var origBody = this.lastJob.response.body;
+
+        if (!this.isDataResponse(origStatus, origBody)) return false;
+
+        // Step 2: Try adjacent IDs and collect responses
+        var testIDs = [];
+        if (numericOrig > 1) testIDs.push(numericOrig - 1);
+        testIDs.push(numericOrig + 1);
+        if (numericOrig > 2) testIDs.push(numericOrig - 2);
+        testIDs.push(numericOrig + 2);
+
+        var successfulAlternates = [];
+
+        for (var t = 0; t < testIDs.length; t++) {
+            if (!this.request(String(testIDs[t]))) continue;
+            var altStatus = this.lastJob.response.msg2;
+            var altBody = this.lastJob.response.body;
+
+            if (this.isDataResponse(altStatus, altBody) &&
+                this.hasDifferentData(origBody, altBody)) {
+                successfulAlternates.push({
+                    id: testIDs[t],
+                    status: altStatus,
+                    bodyLength: altBody.length,
+                    body: altBody
+                });
+            }
+        }
+
+        // Need at least 2 different IDs returning different data for confirmation
+        if (successfulAlternates.length < 2) return false;
+
+        // Step 3: Confirm that the alternates contain different data from each other too
+        if (!this.hasDifferentData(successfulAlternates[0].body, successfulAlternates[1].body)) return false;
+
+        // Step 4: Negative test - a very large ID should not return real data
+        var nonexistentID = 999999999;
+        if (!this.request(String(nonexistentID))) return false;
+        var notFoundStatus = this.lastJob.response.msg2;
+        var notFoundBody = this.lastJob.response.body;
+
+        // If the non-existent ID also returns 200 with similar sized content, it is a catch-all
+        if (notFoundStatus == 200 && !this.hasDifferentData(origBody, notFoundBody)) return false;
+
+        var details = this.scheme.getInputTypeStr(this.inputIndex) +
+            " input [bold][dark]" + this.scheme.getInputName(this.inputIndex) +
+            "[/dark][/bold] appears to reference objects by sequential ID.[break][break]" +
+            "Original ID [bold]" + origValue + "[/bold]: status " + origStatus + ", " + origBody.length + " bytes.[break]";
+
+        for (var s = 0; s < successfulAlternates.length; s++) {
+            details += "Alternate ID [bold]" + successfulAlternates[s].id + "[/bold]: status " +
+                successfulAlternates[s].status + ", " + successfulAlternates[s].bodyLength + " bytes.[break]";
+        }
+        details += "Non-existent ID [bold]" + nonexistentID + "[/bold]: status " + notFoundStatus + ", " + notFoundBody.length + " bytes.[break]";
+        details += "[break]Three different IDs returned three different data sets, confirming object enumeration.";
+
+        this.alert(String(successfulAlternates[0].id), details);
+        return true;
+    };
+
+    // ---- UUID / string ID manipulation ----
+    classIDOR.prototype.testStringIDOR = function() {
+        var origValue = this.getOrigValue();
+
+        // Skip if numeric (handled above) or too short
+        if (!isNaN(parseInt(origValue, 10)) && origValue == String(parseInt(origValue, 10))) return false;
+        if (origValue.length < 2) return false;
+
+        // Step 1: Baseline
+        if (!this.request(origValue)) return false;
+        var origStatus = this.lastJob.response.msg2;
+        var origBody = this.lastJob.response.body;
+
+        if (!this.isDataResponse(origStatus, origBody)) return false;
+
+        // Step 2: Try path traversal in ID field
+        var traversalPayloads = [
+            '../' + origValue,
+            '../../' + origValue,
+            origValue + '/../admin',
+            '..'
+        ];
+
+        for (var p = 0; p < traversalPayloads.length; p++) {
+            if (!this.request(traversalPayloads[p])) continue;
+            var travStatus = this.lastJob.response.msg2;
+            var travBody = this.lastJob.response.body;
+
+            if (this.isDataResponse(travStatus, travBody) &&
+                this.hasDifferentData(origBody, travBody)) {
+
+                // Confirm: a nonsense traversal should fail
+                if (!this.request('../NONEXISTENT_' + randStr(10))) continue;
+                var confirmStatus = this.lastJob.response.msg2;
+                if (confirmStatus == 200 && this.isDataResponse(confirmStatus, this.lastJob.response.body) &&
+                    this.hasDifferentData(origBody, this.lastJob.response.body)) {
+                    // Catch-all, skip
+                    continue;
+                }
+
+                this.alert(traversalPayloads[p],
+                    this.scheme.getInputTypeStr(this.inputIndex) +
+                    " input [bold][dark]" + this.scheme.getInputName(this.inputIndex) +
+                    "[/dark][/bold] is vulnerable to path traversal in object ID field.[break]" +
+                    "Original value [bold]" + origValue + "[/bold]: status " + origStatus + ", " + origBody.length + " bytes.[break]" +
+                    "Traversal value [bold]" + traversalPayloads[p] + "[/bold]: status " + travStatus + ", " + travBody.length + " bytes.[break]" +
+                    "Different data was returned, indicating access to a different object.");
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    // ---- Boundary value testing ----
+    classIDOR.prototype.testBoundaryValues = function() {
+        var origValue = this.getOrigValue();
+        var numericOrig = parseInt(origValue, 10);
+        if (isNaN(numericOrig)) return false;
+        if (origValue != String(numericOrig)) return false;
+
+        // Step 1: Baseline
+        if (!this.request(origValue)) return false;
+        var origStatus = this.lastJob.response.msg2;
+        var origBody = this.lastJob.response.body;
+
+        if (!this.isDataResponse(origStatus, origBody)) return false;
+
+        // Step 2: Test boundary values
+        var boundaryTests = [
+            { val: '0', desc: 'zero ID' },
+            { val: '-1', desc: 'negative ID' },
+            { val: '1', desc: 'first ID' }
+        ];
+
+        for (var b = 0; b < boundaryTests.length; b++) {
+            // Skip if it is the same as the original
+            if (boundaryTests[b].val == origValue) continue;
+
+            if (!this.request(boundaryTests[b].val)) continue;
+            var boundStatus = this.lastJob.response.msg2;
+            var boundBody = this.lastJob.response.body;
+
+            // If boundary value returns data that is different from original
+            if (this.isDataResponse(boundStatus, boundBody) &&
+                this.hasDifferentData(origBody, boundBody)) {
+
+                // Confirm with a second different ID
+                var confirmID = (boundaryTests[b].val == '1') ? '2' : '1';
+                if (confirmID == origValue) confirmID = '3';
+                if (!this.request(confirmID)) continue;
+                var confirmStatus = this.lastJob.response.msg2;
+                var confirmBody = this.lastJob.response.body;
+
+                if (this.isDataResponse(confirmStatus, confirmBody) &&
+                    this.hasDifferentData(origBody, confirmBody) &&
+                    this.hasDifferentData(boundBody, confirmBody)) {
+
+                    // Negative: very large ID
+                    if (!this.request('999999999')) continue;
+                    if (this.lastJob.response.msg2 == 200 &&
+                        this.isDataResponse(this.lastJob.response.msg2, this.lastJob.response.body) &&
+                        !this.hasDifferentData(origBody, this.lastJob.response.body)) continue;
+
+                    this.alert(boundaryTests[b].val,
+                        this.scheme.getInputTypeStr(this.inputIndex) +
+                        " input [bold][dark]" + this.scheme.getInputName(this.inputIndex) +
+                        "[/dark][/bold]: boundary value [bold]" + boundaryTests[b].desc + "[/bold] returns accessible data.[break]" +
+                        "Original ID [bold]" + origValue + "[/bold]: status " + origStatus + ".[break]" +
+                        "Boundary ID [bold]" + boundaryTests[b].val + "[/bold]: status " + boundStatus + ".[break]" +
+                        "Confirm ID [bold]" + confirmID + "[/bold]: status " + confirmStatus + ".[break]" +
+                        "All three IDs return different data, confirming horizontal privilege escalation.");
+                    return true;
+                }
+            }
+
+            // Also check: special status on boundary (200 on 0 or -1 when you would expect 400/404)
+            if ((boundaryTests[b].val == '0' || boundaryTests[b].val == '-1') &&
+                boundStatus == 200 && origStatus == 200 &&
+                this.isDataResponse(boundStatus, boundBody)) {
+                // If 0 or -1 returns valid data, this is suspicious but need more evidence
+                // Already covered by the check above
+            }
+        }
+
+        return false;
+    };
+
+    // ---- JSON body IDOR ----
+    classIDOR.prototype.testJSONBodyIDOR = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+
+        // Only test inputs whose name suggests an ID
+        var idNames = ['id', 'uid', 'user_id', 'userId', 'account', 'accountId',
+                       'account_id', 'profile', 'profileId', 'profile_id',
+                       'doc', 'docId', 'document_id', 'order', 'orderId', 'order_id',
+                       'item', 'itemId', 'item_id', 'record', 'recordId', 'record_id'];
+        var isIDField = false;
+        var inputNameLC = inputName.toLowerCase();
+        for (var n = 0; n < idNames.length; n++) {
+            if (inputNameLC == idNames[n] || inputNameLC.indexOf(idNames[n]) != -1) {
+                isIDField = true;
+                break;
+            }
+        }
+        // Also match if name ends with _id or Id
+        if (!isIDField && (inputNameLC.match(/(_id|id)$/))) isIDField = true;
+        if (!isIDField) return false;
+
+        var numericOrig = parseInt(origValue, 10);
+        if (isNaN(numericOrig)) return false;
+
+        // Build JSON payloads with different IDs
+        var baseline = '{"' + inputName + '":' + origValue + '}';
+        if (!this.requestRaw(this.scheme.path, baseline, "POST")) return false;
+        var origStatus = this.lastJob.response.msg2;
+        var origBody = this.lastJob.response.body;
+        if (!this.isDataResponse(origStatus, origBody)) return false;
+
+        var altID = (numericOrig > 1) ? numericOrig - 1 : numericOrig + 1;
+        var altPayload = '{"' + inputName + '":' + altID + '}';
+        if (!this.requestRaw(this.scheme.path, altPayload, "POST")) return false;
+        var altStatus = this.lastJob.response.msg2;
+        var altBody = this.lastJob.response.body;
+
+        if (!this.isDataResponse(altStatus, altBody)) return false;
+        if (!this.hasDifferentData(origBody, altBody)) return false;
+
+        // Confirm with a third ID
+        var altID2 = numericOrig + 2;
+        var altPayload2 = '{"' + inputName + '":' + altID2 + '}';
+        if (!this.requestRaw(this.scheme.path, altPayload2, "POST")) return false;
+        var altStatus2 = this.lastJob.response.msg2;
+        var altBody2 = this.lastJob.response.body;
+
+        if (!this.isDataResponse(altStatus2, altBody2)) return false;
+        if (!this.hasDifferentData(origBody, altBody2)) return false;
+        if (!this.hasDifferentData(altBody, altBody2)) return false;
+
+        // Negative confirmation
+        var noexist = '{"' + inputName + '":999999999}';
+        if (!this.requestRaw(this.scheme.path, noexist, "POST")) return false;
+        if (this.lastJob.response.msg2 == 200 &&
+            !this.hasDifferentData(origBody, this.lastJob.response.body)) return false;
+
+        this.alert(altPayload,
+            "IDOR via JSON body on [bold][dark]" + inputName + "[/dark][/bold].[break]" +
+            "ID " + origValue + ": status " + origStatus + ", " + origBody.length + " bytes.[break]" +
+            "ID " + altID + ": status " + altStatus + ", " + altBody.length + " bytes.[break]" +
+            "ID " + altID2 + ": status " + altStatus2 + ", " + altBody2.length + " bytes.[break]" +
+            "Three distinct IDs yield three distinct datasets, confirming enumerable object references.");
+        return true;
+    };
+
+    classIDOR.prototype.startTesting = function() {
+        for (var v = 0; v < this.variations.count; v++) {
+            if (this.foundVulnOnVariation) break;
+            this.currentVariation = v;
+            this.scheme.loadVariation(this.variations.item(v));
+
+            if (this.testNumericIDOR()) continue;
+            if (this.testStringIDOR()) continue;
+            if (this.testBoundaryValues()) continue;
+            if (this.testJSONBodyIDOR()) continue;
+        }
+    };
+}
+
+// main entry point
+for (var i = 0; i < scheme.inputCount; i++) {
+    // Only test inputs that look like IDs
+    var inputNameLC = scheme.getInputName(i).toLowerCase();
+    var looksLikeID = (scheme.inputHasFlag(i, INPUT_FLAG_NUMERIC) ||
+                       inputNameLC.match(/id$/) ||
+                       inputNameLC.indexOf('id') != -1 ||
+                       inputNameLC.indexOf('uid') != -1 ||
+                       inputNameLC.indexOf('account') != -1 ||
+                       inputNameLC.indexOf('user') != -1 ||
+                       inputNameLC.indexOf('profile') != -1 ||
+                       inputNameLC.indexOf('order') != -1 ||
+                       inputNameLC.indexOf('item') != -1 ||
+                       inputNameLC.indexOf('doc') != -1 ||
+                       inputNameLC.indexOf('record') != -1 ||
+                       inputNameLC.indexOf('num') != -1 ||
+                       inputNameLC.indexOf('key') != -1 ||
+                       inputNameLC.indexOf('ref') != -1 ||
+                       inputNameLC == 'pk' ||
+                       inputNameLC == 'idx' ||
+                       inputNameLC == 'no');
+
+    if (looksLikeID) {
+        var tester = new classIDOR(scheme, i);
+        tester.startTesting();
+        ScriptProgress(ComputeProgress(i, scheme.inputCount));
+        tester = null;
+    }
+}

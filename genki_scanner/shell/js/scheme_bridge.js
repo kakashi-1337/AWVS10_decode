@@ -114,12 +114,17 @@ class SchemeProxy {
         let getParams = [];
         let postParams = [];
         let cookieParts = [];
+        let jsonBody = {};
+        let hasJsonBody = false;
 
         for (const inp of this._inputs) {
             if (inp.type === 'URL encoded GET') {
                 getParams.push(encodeURIComponent(inp.name) + '=' + encodeURIComponent(inp.value));
             } else if (inp.type === 'URL encoded POST') {
                 postParams.push(encodeURIComponent(inp.name) + '=' + encodeURIComponent(inp.value));
+            } else if (inp.type === 'JSON body') {
+                jsonBody[inp.name] = inp.value;
+                hasJsonBody = true;
             } else if (inp.type === 'Cookie') {
                 cookieParts.push(inp.name + '=' + inp.value);
             } else if (inp.type === 'HTTP Header') {
@@ -133,7 +138,11 @@ class SchemeProxy {
             job.URI = base + sep + getParams.join('&');
         }
 
-        if (postParams.length > 0) {
+        if (hasJsonBody) {
+            job.postData = JSON.stringify(jsonBody);
+            job.verb = job.verb || 'POST';
+            job.request.addHeader('Content-Type', 'application/json');
+        } else if (postParams.length > 0) {
             job.postData = postParams.join('&');
             job.verb = 'POST';
             job.request.addHeader('Content-Type', 'application/x-www-form-urlencoded');

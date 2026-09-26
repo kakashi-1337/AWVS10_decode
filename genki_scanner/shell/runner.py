@@ -1170,33 +1170,48 @@ class ShellOrchestrator:
         return links, forms, api_endpoints, emails_found
 
     def _extract_api_from_js(self, js_code, base_url):
-        """Extract API endpoints from JavaScript source code (SPA bundles)."""
-        endpoints = set()
+        """Extract API endpoints with HTTP methods from JavaScript source code."""
+        endpoints = {}
         parsed = urlparse(base_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
 
-        patterns = [
-            r'(?:fetch|axios\.(?:get|post|put|delete|patch)|http\.(?:get|post|put|delete|patch))\s*\(\s*["\']([/][^"\']*)["\']',
+        static_exts = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.ico',
+                       '.woff', '.woff2', '.ttf', '.eot', '.map'}
+
+        def _add(path, method="GET"):
+            if not path or path.startswith('//'):
+                return
+            ext = os.path.splitext(path.split('?')[0])[1].lower()
+            if ext in static_exts:
+                return
+            url = base + path
+            endpoints.setdefault(url, set()).add(method.upper())
+
+        for m in re.finditer(
+            r'(?:axios|http)\.(get|post|put|delete|patch)\s*\(\s*["\']([/][^"\']*)["\']',
+            js_code, re.I
+        ):
+            _add(m.group(2), m.group(1))
+
+        for m in re.finditer(r'fetch\s*\(\s*["\']([/][^"\']*)["\']', js_code, re.I):
+            _add(m.group(1), "GET")
+
+        for m in re.finditer(
+            r'\.(get|post|put|delete|patch|head|options)\s*(?:<[^>]*>)?\s*\(\s*["\']([/][^"\']+)["\']',
+            js_code, re.I
+        ):
+            _add(m.group(2), m.group(1))
+
+        no_method_pats = [
             r'(?:url|endpoint|apiUrl|baseUrl|base_url|API_URL|API_BASE|apiBase)\s*[:=]\s*["\']([/][^"\']+)["\']',
-            r'\.(?:get|post|put|delete|patch|head|options)\s*(?:<[^>]*>)?\s*\(\s*["\']([/][^"\']+)["\']',
             r'(?:path|route)\s*:\s*["\']([/][a-zA-Z0-9/_\-:]+)["\']',
             r'[`]([/](?:api|rest|v\d+)[/][^`\n]{3,60})[`]',
             r'["\']([/][^"\']*graphql[^"\']*)["\']',
             r'["\']([/](?:api|rest|service|backend)[/][^"\']{2,80})["\']',
         ]
-
-        static_exts = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.ico',
-                       '.woff', '.woff2', '.ttf', '.eot', '.map'}
-
-        for pat in patterns:
-            for match in re.finditer(pat, js_code, re.I):
-                path = match.group(1)
-                if not path or path.startswith('//'):
-                    continue
-                ext = os.path.splitext(path.split('?')[0])[1].lower()
-                if ext in static_exts:
-                    continue
-                endpoints.add(base + path)
+        for pat in no_method_pats:
+            for m in re.finditer(pat, js_code, re.I):
+                _add(m.group(1), "GET")
 
         return endpoints
 
@@ -1246,7 +1261,7 @@ class ShellOrchestrator:
             js_urls = [l for l in same_host
                        if re.search(r'\.js(\?|$)', urlparse(l).path.split('/')[-1])]
 
-            all_api_eps = set(api_endpoints)
+            all_api_eps = {ep: {"GET"} for ep in api_endpoints}
             if js_urls:
                 print(f"  {C.info('[TREE]')} Scanning {min(len(js_urls), 15)} JS files for API endpoints")
 
@@ -1257,14 +1272,16 @@ class ShellOrchestrator:
                     js_body = js_resp.content.decode('utf-8', errors='replace')
                     if js_resp.status_code == 200 and len(js_body) > 50:
                         js_api_eps = self._extract_api_from_js(js_body, target_url)
-                        all_api_eps.update(js_api_eps)
+                        for url, methods in js_api_eps.items():
+                            all_api_eps.setdefault(url, set()).update(methods)
                     time.sleep(delay * 0.3)
                 except Exception:
                     pass
 
-            for ep in all_api_eps:
-                if urlparse(ep).hostname == parsed_base.hostname:
-                    tree.add_url(ep)
+            for ep_url, methods in all_api_eps.items():
+                if urlparse(ep_url).hostname == parsed_base.hostname:
+                    for method in methods:
+                        tree.add_api_endpoint(ep_url, method)
 
             cookie_parts = []
             for c in cookie_header.split(','):
@@ -1285,7 +1302,8 @@ class ShellOrchestrator:
                   f"{C.bold(str(len(tree.all_schemes)))} schemes, "
                   f"{C.bold(str(len(tree.all_directories)))} dirs")
             if all_api_eps:
-                print(f"  {C.info('[TREE]')} {C.bold(str(len(all_api_eps)))} API endpoints from JS analysis")
+                api_count = sum(len(m) for m in all_api_eps.values())
+                print(f"  {C.info('[TREE]')} {C.bold(str(len(all_api_eps)))} API endpoints ({api_count} schemes) from JS analysis")
 
         except Exception as e:
             print(f"  {C.warn('[WARN]')} Site tree extraction failed: {e}")

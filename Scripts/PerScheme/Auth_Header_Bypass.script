@@ -1,0 +1,446 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+{ // class for Authentication/Authorization Header Bypass testing
+    function classAuthBypass(scheme, inputIndex) {
+        this.scheme = scheme;
+        this.inputIndex = inputIndex;
+        this.variations = scheme.selectVariationsForInput(inputIndex);
+        this.currentVariation = 0;
+        this.foundVulnOnVariation = false;
+        this.lastJob = null;
+        this.baselineBody = "";
+        this.baselineStatus = 0;
+        this.baselineLength = 0;
+    }
+
+    classAuthBypass.prototype.request = function(value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classAuthBypass.prototype.requestWithHeaders = function(value, headers) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        for (var h = 0; h < headers.length; h++) {
+            this.lastJob.request.addHeader(headers[h].name, headers[h].value);
+        }
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classAuthBypass.prototype.requestWithMethod = function(value, method, headers) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.verb = method;
+        scheme.populateRequest(this.lastJob);
+        if (headers) {
+            for (var h = 0; h < headers.length; h++) {
+                this.lastJob.request.addHeader(headers[h].name, headers[h].value);
+            }
+        }
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classAuthBypass.prototype.requestRaw = function(path, body, method, contentType) {
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.URI = path;
+        this.lastJob.verb = method || "GET";
+        if (body) {
+            this.lastJob.postData = body;
+            this.lastJob.request.addHeader("Content-Type", contentType || "application/json");
+        }
+        this.lastJob.execute();
+        return (!this.lastJob.wasError);
+    };
+
+    classAuthBypass.prototype.requestRawWithHeaders = function(path, method, headers) {
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.URI = path;
+        this.lastJob.verb = method || "GET";
+        for (var h = 0; h < headers.length; h++) {
+            this.lastJob.request.addHeader(headers[h].name, headers[h].value);
+        }
+        this.lastJob.execute();
+        return (!this.lastJob.wasError);
+    };
+
+    classAuthBypass.prototype.alert = function(testValue, details) {
+        this.foundVulnOnVariation = true;
+        var ri = new TReportItem();
+        ri.LoadFromFile("HPP.xml");
+        ri.affects = this.scheme.path;
+        ri.alertPath = "Scripts/Auth Header Bypass";
+        ri.parameter = this.scheme.getInputName(this.inputIndex);
+        ri.parameterValue = testValue;
+        ri.setHttpInfo(this.lastJob);
+        ri.name = "Authentication/Authorization Bypass via Header Manipulation";
+        ri.severity = 3;
+        ri.details = details;
+        AddReportItem(ri);
+    };
+
+    classAuthBypass.prototype.getOrigValue = function() {
+        var value = "";
+        for (var i = 0; i < this.variations.count; i++) {
+            var varValue = this.scheme.getVariation(this.variations.item(i)).item(this.inputIndex);
+            if (value == "" && varValue != "") {
+                value = varValue;
+                break;
+            }
+        }
+        return value;
+    };
+
+    classAuthBypass.prototype.captureBaseline = function() {
+        var origValue = this.getOrigValue();
+        if (!this.request(origValue)) return false;
+        this.baselineBody = this.lastJob.response.body;
+        this.baselineStatus = this.lastJob.response.msg2;
+        this.baselineLength = this.baselineBody.length;
+        return true;
+    };
+
+    // Normalize body for comparison
+    classAuthBypass.prototype.normalizeBody = function(body) {
+        body = body.replace(/([0-1]?[0-9]|[2][0-3]):([0-5][0-9])[.|:]([0-9][0-9])/g, "");
+        body = body.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/g, "");
+        body = body.replace(/[a-f0-9]{32,}/g, "");
+        return body;
+    };
+
+    // Check if response indicates a successful bypass
+    classAuthBypass.prototype.isBypass = function(bypassStatus, bypassBody) {
+        // Case 1: Status changed from auth-denied to success
+        if ((this.baselineStatus == 401 || this.baselineStatus == 403) &&
+            (bypassStatus == 200 || bypassStatus == 301 || bypassStatus == 302)) {
+            return true;
+        }
+
+        // Case 2: Same status but significantly more content (suggesting data leak)
+        if (bypassStatus == 200 && this.baselineStatus == 200) {
+            if (bypassBody.length > this.baselineLength + 200) {
+                var normBase = this.normalizeBody(this.baselineBody);
+                var normBypass = this.normalizeBody(bypassBody);
+                if (normBypass.length > normBase.length + 100) return true;
+            }
+        }
+
+        return false;
+    };
+
+    // ---- IP-based auth bypass headers ----
+    classAuthBypass.prototype.testIPBypass = function() {
+        var origValue = this.getOrigValue();
+
+        var ipHeaders = [
+            { name: 'X-Forwarded-For', value: '127.0.0.1' },
+            { name: 'X-Real-IP', value: '127.0.0.1' },
+            { name: 'X-Originating-IP', value: '127.0.0.1' },
+            { name: 'X-Remote-IP', value: '127.0.0.1' },
+            { name: 'X-Client-IP', value: '127.0.0.1' },
+            { name: 'X-Forwarded-For', value: '10.0.0.1' },
+            { name: 'X-Forwarded-For', value: '::1' },
+            { name: 'True-Client-IP', value: '127.0.0.1' }
+        ];
+
+        for (var h = 0; h < ipHeaders.length; h++) {
+            if (!this.requestWithHeaders(origValue, [ipHeaders[h]])) continue;
+            var bypassStatus = this.lastJob.response.msg2;
+            var bypassBody = this.lastJob.response.body;
+
+            if (!this.isBypass(bypassStatus, bypassBody)) continue;
+
+            // Confirmation: use a different, non-local IP - should NOT bypass
+            var confirmHeader = { name: ipHeaders[h].name, value: '203.0.113.42' };
+            if (!this.requestWithHeaders(origValue, [confirmHeader])) continue;
+            var confirmStatus = this.lastJob.response.msg2;
+            var confirmBody = this.lastJob.response.body;
+
+            // Non-local IP should be denied (same as baseline)
+            if (this.isBypass(confirmStatus, confirmBody)) continue;
+
+            // Second confirmation: repeat the bypass header
+            if (!this.requestWithHeaders(origValue, [ipHeaders[h]])) continue;
+            var reconfirmStatus = this.lastJob.response.msg2;
+            if (reconfirmStatus != bypassStatus) continue;
+
+            this.alert(ipHeaders[h].name + ': ' + ipHeaders[h].value,
+                "IP-based authentication bypass via [bold]" + ipHeaders[h].name + "[/bold] header.[break]" +
+                "Normal request: status [bold]" + this.baselineStatus + "[/bold], " + this.baselineLength + " bytes.[break]" +
+                "With [bold]" + ipHeaders[h].name + ": " + ipHeaders[h].value + "[/bold]: status [bold]" + bypassStatus + "[/bold], " + bypassBody.length + " bytes.[break]" +
+                "With non-local IP (203.0.113.42): status [bold]" + confirmStatus + "[/bold], " + confirmBody.length + " bytes.[break]" +
+                "The server trusts the [bold]" + ipHeaders[h].name + "[/bold] header for IP-based access control.");
+            return true;
+        }
+
+        return false;
+    };
+
+    // ---- Path rewrite bypass (X-Original-URL, X-Rewrite-URL) ----
+    classAuthBypass.prototype.testPathRewrite = function() {
+        // Only meaningful if the baseline returns 401/403/404
+        if (this.baselineStatus != 401 && this.baselineStatus != 403 && this.baselineStatus != 404) return false;
+
+        var origValue = this.getOrigValue();
+        var origPath = this.scheme.path;
+
+        var rewriteHeaders = [
+            { name: 'X-Original-URL', value: origPath },
+            { name: 'X-Rewrite-URL', value: origPath }
+        ];
+
+        for (var r = 0; r < rewriteHeaders.length; r++) {
+            // Request / with the rewrite header pointing to the protected path
+            if (!this.requestRawWithHeaders('/', 'GET', [rewriteHeaders[r]])) continue;
+            var rewriteStatus = this.lastJob.response.msg2;
+            var rewriteBody = this.lastJob.response.body;
+
+            // Check if we got access to the protected resource
+            if (rewriteStatus == 200 || rewriteStatus == 301 || rewriteStatus == 302) {
+                // Must have meaningful content different from a generic home page
+                if (rewriteBody.length < 50) continue;
+
+                // Confirm: rewrite to a nonexistent path should fail
+                if (!this.requestRawWithHeaders('/', 'GET',
+                    [{ name: rewriteHeaders[r].name, value: '/NONEXISTENT_' + randStr(10) }])) continue;
+                var confirmStatus = this.lastJob.response.msg2;
+
+                // Nonexistent path should return 404 or different content
+                if (confirmStatus == rewriteStatus) continue;
+
+                // Second confirmation: repeat original rewrite
+                if (!this.requestRawWithHeaders('/', 'GET', [rewriteHeaders[r]])) continue;
+                if (this.lastJob.response.msg2 != rewriteStatus) continue;
+
+                this.alert(rewriteHeaders[r].name + ': ' + rewriteHeaders[r].value,
+                    "Path-based authorization bypass via [bold]" + rewriteHeaders[r].name + "[/bold] header.[break]" +
+                    "Direct access to [bold]" + origPath + "[/bold]: status [bold]" + this.baselineStatus + "[/bold].[break]" +
+                    "Request to / with [bold]" + rewriteHeaders[r].name + ": " + origPath + "[/bold]: status [bold]" + rewriteStatus + "[/bold], " + rewriteBody.length + " bytes.[break]" +
+                    "The reverse proxy/framework processes [bold]" + rewriteHeaders[r].name + "[/bold] to override the request path, bypassing front-end access control.");
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    // ---- Malformed/empty Authorization header ----
+    classAuthBypass.prototype.testAuthorizationHeader = function() {
+        var origValue = this.getOrigValue();
+
+        var authPayloads = [
+            { value: '', desc: 'empty Authorization header' },
+            { value: 'Bearer', desc: 'Bearer with no token' },
+            { value: 'Bearer null', desc: 'Bearer null' },
+            { value: 'Bearer undefined', desc: 'Bearer undefined' },
+            { value: 'Bearer ""', desc: 'Bearer empty string' },
+            { value: 'Basic Og==', desc: 'Basic with empty credentials (base64 of ":")' },
+            { value: 'Bearer ' + randStr(20), desc: 'Bearer with random token' }
+        ];
+
+        for (var a = 0; a < authPayloads.length; a++) {
+            var headers = [{ name: 'Authorization', value: authPayloads[a].value }];
+            if (!this.requestWithHeaders(origValue, headers)) continue;
+            var bypassStatus = this.lastJob.response.msg2;
+            var bypassBody = this.lastJob.response.body;
+
+            if (!this.isBypass(bypassStatus, bypassBody)) continue;
+
+            // Confirm: a clearly invalid auth header should still be denied
+            var invalidHeaders = [{ name: 'Authorization', value: 'InvalidScheme ' + randStr(30) }];
+            if (!this.requestWithHeaders(origValue, invalidHeaders)) continue;
+            var invalidStatus = this.lastJob.response.msg2;
+
+            // If invalid auth also bypasses, the auth system might be completely broken
+            // or there is no auth -- either way skip to avoid noise
+            if (this.isBypass(invalidStatus, this.lastJob.response.body)) continue;
+
+            // Second confirmation: repeat the bypass
+            if (!this.requestWithHeaders(origValue, headers)) continue;
+            if (this.lastJob.response.msg2 != bypassStatus) continue;
+
+            this.alert('Authorization: ' + authPayloads[a].value,
+                "Authentication bypass via " + authPayloads[a].desc + ".[break]" +
+                "Normal request: status [bold]" + this.baselineStatus + "[/bold].[break]" +
+                "With [bold]Authorization: " + authPayloads[a].value + "[/bold]: status [bold]" + bypassStatus + "[/bold], " + bypassBody.length + " bytes.[break]" +
+                "With invalid scheme: status [bold]" + invalidStatus + "[/bold].[break]" +
+                "The server fails to properly validate the Authorization header.");
+            return true;
+        }
+
+        return false;
+    };
+
+    // ---- Host header injection ----
+    classAuthBypass.prototype.testHostHeader = function() {
+        var origValue = this.getOrigValue();
+
+        var hostPayloads = [
+            { value: 'localhost', desc: 'localhost' },
+            { value: '127.0.0.1', desc: '127.0.0.1' },
+            { value: 'localhost:80', desc: 'localhost:80' },
+            { value: '0.0.0.0', desc: '0.0.0.0' }
+        ];
+
+        for (var h = 0; h < hostPayloads.length; h++) {
+            var headers = [{ name: 'Host', value: hostPayloads[h].value }];
+            if (!this.requestWithHeaders(origValue, headers)) continue;
+            var hostStatus = this.lastJob.response.msg2;
+            var hostBody = this.lastJob.response.body;
+
+            if (!this.isBypass(hostStatus, hostBody)) continue;
+
+            // Confirm: non-local host should not bypass
+            var confirmHeaders = [{ name: 'Host', value: 'evil.example.com' }];
+            if (!this.requestWithHeaders(origValue, confirmHeaders)) continue;
+            var confirmStatus = this.lastJob.response.msg2;
+
+            if (this.isBypass(confirmStatus, this.lastJob.response.body)) continue;
+
+            // Second confirmation
+            if (!this.requestWithHeaders(origValue, headers)) continue;
+            if (this.lastJob.response.msg2 != hostStatus) continue;
+
+            this.alert('Host: ' + hostPayloads[h].value,
+                "Host-based authentication bypass via Host header injection.[break]" +
+                "Normal request: status [bold]" + this.baselineStatus + "[/bold].[break]" +
+                "With [bold]Host: " + hostPayloads[h].value + "[/bold]: status [bold]" + hostStatus + "[/bold], " + hostBody.length + " bytes.[break]" +
+                "With Host: evil.example.com: status [bold]" + confirmStatus + "[/bold].[break]" +
+                "The server uses the Host header for access control decisions.");
+            return true;
+        }
+
+        return false;
+    };
+
+    // ---- HTTP method override ----
+    classAuthBypass.prototype.testMethodOverride = function() {
+        var origValue = this.getOrigValue();
+
+        // Only test if baseline is auth-denied
+        if (this.baselineStatus != 401 && this.baselineStatus != 403 && this.baselineStatus != 405) return false;
+
+        var methodHeaders = [
+            { name: 'X-HTTP-Method-Override', value: 'GET' },
+            { name: 'X-HTTP-Method-Override', value: 'PUT' },
+            { name: 'X-HTTP-Method-Override', value: 'DELETE' },
+            { name: 'X-HTTP-Method-Override', value: 'PATCH' },
+            { name: 'X-HTTP-Method', value: 'GET' },
+            { name: 'X-Method-Override', value: 'GET' }
+        ];
+
+        for (var m = 0; m < methodHeaders.length; m++) {
+            if (!this.requestWithHeaders(origValue, [methodHeaders[m]])) continue;
+            var overrideStatus = this.lastJob.response.msg2;
+            var overrideBody = this.lastJob.response.body;
+
+            if (!this.isBypass(overrideStatus, overrideBody)) continue;
+
+            // Confirm: override to a method that should also be blocked
+            var confirmHeader = { name: methodHeaders[m].name, value: 'INVALID_METHOD_' + randStr(4) };
+            if (!this.requestWithHeaders(origValue, [confirmHeader])) continue;
+            var confirmStatus = this.lastJob.response.msg2;
+
+            // Invalid method should not bypass
+            if (this.isBypass(confirmStatus, this.lastJob.response.body)) continue;
+
+            this.alert(methodHeaders[m].name + ': ' + methodHeaders[m].value,
+                "HTTP method override bypass via [bold]" + methodHeaders[m].name + "[/bold] header.[break]" +
+                "Normal request: status [bold]" + this.baselineStatus + "[/bold].[break]" +
+                "With [bold]" + methodHeaders[m].name + ": " + methodHeaders[m].value + "[/bold]: status [bold]" + overrideStatus + "[/bold], " + overrideBody.length + " bytes.[break]" +
+                "The server accepts HTTP method override headers, which can bypass method-based access controls.");
+            return true;
+        }
+
+        return false;
+    };
+
+    // ---- X-Forwarded-Host / X-Forwarded-Proto manipulation ----
+    classAuthBypass.prototype.testForwardedHostProto = function() {
+        var origValue = this.getOrigValue();
+
+        var forwardHeaders = [
+            { name: 'X-Forwarded-Host', value: 'localhost' },
+            { name: 'X-Forwarded-Host', value: '127.0.0.1' },
+            { name: 'X-Forwarded-Proto', value: 'https' },
+            { name: 'X-Forwarded-Proto', value: 'http' },
+            { name: 'X-Forwarded-Port', value: '443' },
+            { name: 'X-Forwarded-Port', value: '8080' }
+        ];
+
+        for (var f = 0; f < forwardHeaders.length; f++) {
+            if (!this.requestWithHeaders(origValue, [forwardHeaders[f]])) continue;
+            var fwdStatus = this.lastJob.response.msg2;
+            var fwdBody = this.lastJob.response.body;
+
+            if (!this.isBypass(fwdStatus, fwdBody)) continue;
+
+            // Confirm: an evil forwarded host should not bypass
+            var confirmHeader = { name: forwardHeaders[f].name, value: 'evil.example.com' };
+            if (forwardHeaders[f].name == 'X-Forwarded-Proto') {
+                confirmHeader = { name: 'X-Forwarded-Proto', value: 'ftp' };
+            }
+            if (forwardHeaders[f].name == 'X-Forwarded-Port') {
+                confirmHeader = { name: 'X-Forwarded-Port', value: '99999' };
+            }
+
+            if (!this.requestWithHeaders(origValue, [confirmHeader])) continue;
+            var confirmStatus = this.lastJob.response.msg2;
+
+            if (this.isBypass(confirmStatus, this.lastJob.response.body)) continue;
+
+            this.alert(forwardHeaders[f].name + ': ' + forwardHeaders[f].value,
+                "Authorization bypass via [bold]" + forwardHeaders[f].name + "[/bold] header manipulation.[break]" +
+                "Normal request: status [bold]" + this.baselineStatus + "[/bold].[break]" +
+                "With [bold]" + forwardHeaders[f].name + ": " + forwardHeaders[f].value + "[/bold]: status [bold]" + fwdStatus + "[/bold], " + fwdBody.length + " bytes.[break]" +
+                "The server trusts forwarded headers for authorization decisions.");
+            return true;
+        }
+
+        return false;
+    };
+
+    classAuthBypass.prototype.startTesting = function() {
+        for (var v = 0; v < this.variations.count; v++) {
+            if (this.foundVulnOnVariation) break;
+            this.currentVariation = v;
+            this.scheme.loadVariation(this.variations.item(v));
+
+            if (!this.captureBaseline()) continue;
+
+            if (this.testIPBypass()) continue;
+            if (this.testPathRewrite()) continue;
+            if (this.testAuthorizationHeader()) continue;
+            if (this.testHostHeader()) continue;
+            if (this.testMethodOverride()) continue;
+            if (this.testForwardedHostProto()) continue;
+        }
+    };
+}
+
+// main entry point
+for (var i = 0; i < scheme.inputCount; i++) {
+    var tester = new classAuthBypass(scheme, i);
+    tester.startTesting();
+    ScriptProgress(ComputeProgress(i, scheme.inputCount));
+    tester = null;
+}

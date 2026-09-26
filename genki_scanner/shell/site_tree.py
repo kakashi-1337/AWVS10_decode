@@ -43,6 +43,8 @@ class Scheme:
     INPUT_FLAG_IS_FILE = 0x4
     INPUT_FLAG_IS_PASSWORD = 0x10
     INPUT_FLAG_NUMERIC = 0x40
+    INPUT_FLAG_HAS_NAME = 0x100
+    INPUT_FLAG_CAN_BE_ARRAY = 0x200
 
     def __init__(self, url, method="GET"):
         self.url = url
@@ -147,12 +149,59 @@ class Scheme:
 
         for name, values in params.items():
             val = values[0] if values else ""
-            flags = 0
+            flags = (cls.INPUT_FLAG_HAS_NAME |
+                     cls.INPUT_FLAG_REFLECTION_TESTS |
+                     cls.INPUT_FLAG_CAN_BE_ARRAY)
             if val.isdigit():
                 flags |= cls.INPUT_FLAG_NUMERIC
             scheme.add_input(name, val, "URL encoded GET", flags)
             if values:
                 scheme.add_variation({name: val})
+
+        return scheme
+
+    @classmethod
+    def from_api_endpoint(cls, url, method="GET"):
+        """Create a scheme from a discovered API endpoint with synthesized inputs."""
+        scheme = cls(url, method)
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+
+        API_FLAGS = (cls.INPUT_FLAG_REFLECTION_TESTS |
+                     cls.INPUT_FLAG_CAN_BE_ARRAY |
+                     cls.INPUT_FLAG_HAS_NAME)
+
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        for name, values in params.items():
+            val = values[0] if values else ""
+            flags = API_FLAGS
+            if val.isdigit():
+                flags |= cls.INPUT_FLAG_NUMERIC
+            scheme.add_input(name, val, "URL encoded GET", flags)
+            if values:
+                scheme.add_variation({name: val})
+
+        path_parts = path.split('/')
+        for part in path_parts:
+            if part.startswith(':') or (part.startswith('{') and part.endswith('}')):
+                param_name = part.strip(':{}')
+                scheme.add_input(param_name, "1", "URL encoded GET",
+                                 API_FLAGS | cls.INPUT_FLAG_NUMERIC)
+                scheme.add_variation({param_name: "1"})
+
+        if not scheme.inputs:
+            if method in ("POST", "PUT", "PATCH"):
+                scheme.add_input("id", "1", "JSON body",
+                                 API_FLAGS | cls.INPUT_FLAG_NUMERIC)
+                scheme.add_input("name", "test", "JSON body", API_FLAGS)
+                scheme.add_input("value", "test", "JSON body", API_FLAGS)
+                scheme.add_variation({"id": "1", "name": "test", "value": "test"})
+            else:
+                scheme.add_input("id", "1", "URL encoded GET",
+                                 API_FLAGS | cls.INPUT_FLAG_NUMERIC)
+                scheme.add_variation({"id": "1"})
+
+        scheme.add_input("Authorization", "Bearer test", "HTTP Header", API_FLAGS)
 
         return scheme
 
@@ -163,7 +212,9 @@ class Scheme:
         input_type = "URL encoded POST" if method.upper() == "POST" else "URL encoded GET"
 
         for p in params:
-            flags = 0
+            flags = (cls.INPUT_FLAG_HAS_NAME |
+                     cls.INPUT_FLAG_REFLECTION_TESTS |
+                     cls.INPUT_FLAG_CAN_BE_ARRAY)
             ptype = p.get("type", "text").lower()
             if ptype == "file":
                 flags |= cls.INPUT_FLAG_IS_FILE
@@ -240,6 +291,23 @@ class SiteTree:
             sf = SiteFile(action_url)
             sf.add_scheme(scheme)
             self.all_files[action_url] = sf
+
+        return scheme
+
+    def add_api_endpoint(self, url, method="GET"):
+        scheme = Scheme.from_api_endpoint(url, method)
+        self.all_schemes.append(scheme)
+
+        parsed = urlparse(url)
+        directory = "/".join(parsed.path.split("/")[:-1]) + "/"
+        self.all_directories.add(directory)
+
+        if url not in self.all_files:
+            sf = SiteFile(url)
+            sf.add_scheme(scheme)
+            self.all_files[url] = sf
+        else:
+            self.all_files[url].add_scheme(scheme)
 
         return scheme
 
