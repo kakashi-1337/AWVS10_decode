@@ -45,9 +45,14 @@ NETWORK_PHASE = ("Network", "network")
 WEBAPPS_PHASE = ("WebApps", "webapps")
 
 # Maps script name prefixes (lowered) to required tech keywords.
-# If a script matches a prefix here but NONE of the keywords appear
-# in the target's detected tech stack, the script is skipped.
-# Scripts with no matching prefix always run (generic checks).
+# --- Smart Script Filtering ---
+# Two-layer system:
+# 1. TECH_FILTER: prefix-based. If script name starts with a key,
+#    it only runs when ANY keyword from the value list appears in the
+#    detected tech set.
+# 2. SCRIPT_TECH_MAP: exact-name mapping for scripts that don't follow
+#    prefix conventions. Same logic: only run when a keyword matches.
+# Scripts matching neither map always run (generic checks).
 TECH_FILTER = {
     # CMS
     "wordpress": ["wordpress", "wp-"],
@@ -77,22 +82,24 @@ TECH_FILTER = {
     "kayakofusion": ["kayako"],
     "zabbix": ["zabbix"],
     "symphony": ["symphony cms"],
-    # PHP frameworks
+    # PHP frameworks / tools
     "laravel": ["laravel"],
     "symfony": ["symfony"],
     "codeigniter": ["codeigniter"],
     "cakephp": ["cakephp"],
     "zend": ["zend"],
-    "phpmyadmin": ["phpmyadmin"],
-    "phpliteadmin": ["phpliteadmin"],
-    "phpthumb": ["phpthumb"],
-    "timthumb": ["timthumb"],
+    "phpmyadmin": ["phpmyadmin", "php"],
+    "phpliteadmin": ["phpliteadmin", "php"],
+    "phpthumb": ["phpthumb", "php"],
+    "timthumb": ["timthumb", "php"],
     "php_cgi": ["php"],
     "phpfpm": ["php"],
     "php_hash": ["php"],
-    # Java
+    "phpmoadmin": ["php", "mongodb"],
+    "nginx_php": ["php"],
+    # Java / J2EE
     "j2ee": ["java", "tomcat", "jboss", "weblogic", "glassfish", "wildfly", "jetty"],
-    "jboss": ["jboss", "wildfly"],
+    "jboss": ["jboss", "wildfly", "java"],
     "struts2": ["struts", "java"],
     "spring": ["spring", "java"],
     "primefaces": ["primefaces", "jsf", "java"],
@@ -104,36 +111,41 @@ TECH_FILTER = {
     "glassfish": ["glassfish", "java"],
     "jetty": ["jetty", "java"],
     "weblogic": ["weblogic", "java"],
-    "jenkins": ["jenkins"],
-    "jira": ["jira", "atlassian"],
+    "jenkins": ["jenkins", "java"],
+    "jira": ["jira", "atlassian", "java"],
+    "java_": ["java", "tomcat", "jboss", "weblogic", "glassfish", "wildfly", "jetty"],
+    "jmx_": ["java"],
     # .NET / IIS
     "asp_net": ["asp.net", "iis", ".net"],
     "aspnet": ["asp.net", "iis", ".net"],
-    "iis": ["iis"],
+    "iis": ["iis", "asp.net", ".net"],
     "elmah": ["asp.net", ".net"],
     "ms15-034": ["iis"],
     "ms12-050": ["sharepoint"],
     "ajaxcontroltoolkit": ["asp.net", ".net"],
     # Node.js
-    "nodejs": ["node", "express", "next.js", "nuxt", "koa", "fastify", "hapi"],
+    "nodejs": ["node.js", "express", "next.js", "nuxt", "koa", "fastify", "hapi"],
     # Ruby
     "rails": ["rails", "ruby"],
     "webrick": ["webrick", "ruby"],
+    "rubyonrails": ["rails", "ruby"],
     # Python
     "django": ["django", "python"],
     "flask": ["flask", "python"],
     "pyramid": ["pyramid", "python"],
     "tornado": ["tornado", "python"],
+    "python_": ["python", "django", "flask", "tornado", "pyramid"],
     # Go
     "golang": ["go", "gin", "echo", "fiber"],
-    # API / Auth (always run - no tech filter needed for these)
-    # Cloud / CI-CD (always run)
-    # Other server tech
-    "coldfusion": ["coldfusion"],
+    # ColdFusion / CFML
+    "coldfusion": ["coldfusion", "adobe coldfusion", "lucee"],
     "railo": ["railo", "lucee"],
+    # IBM / Oracle
     "lotus": ["lotus", "domino"],
     "ibm_wcm": ["ibm", "websphere"],
     "ibm_websphere": ["ibm", "websphere"],
+    "oracle_": ["oracle", "java"],
+    # Infrastructure
     "hadoop": ["hadoop"],
     "elasticsearch": ["elasticsearch"],
     "mongodb": ["mongodb"],
@@ -148,6 +160,20 @@ TECH_FILTER = {
     "barracuda": ["barracuda"],
     "log4shell": ["java", "log4j"],
     "spring4shell": ["spring", "java"],
+}
+
+# Exact script name -> required tech keywords (lowercase, without .script)
+SCRIPT_TECH_MAP = {
+    "ajp_audit": ["java", "tomcat", "jboss"],
+    "snoop_servlet": ["java", "tomcat", "jboss", "weblogic", "glassfish"],
+    "webinfwebxml_audit": ["java", "tomcat", "jboss", "weblogic"],
+    "ioncube_loader_wizard": ["php"],
+    "unprotected_phpmyadmin_interface": ["php", "phpmyadmin"],
+    "phpmoadmin_remote_code_execution": ["php", "mongodb"],
+    "movable_type_4_rce": ["movable type", "movabletype", "perl"],
+    "fantastico_filelist": ["php", "cpanel"],
+    "arbitrary_file_existence_disclosure_in_action_pack": ["rails", "ruby"],
+    "clientaccesspolicy_xml": [".net", "silverlight", "asp.net"],
 }
 
 COMMON_PORTS = [
@@ -434,6 +460,7 @@ class ShellOrchestrator:
         self.soft404 = None
         self.oob_domain = self.config.get("oob_domain", OOB_DOMAIN)
         self._detected_techs = set()
+        self._detected_tech_tokens = set()
         self._scan_dir = None
         self._http_log_fh = None
         self._vuln_http_log_fh = None
@@ -477,7 +504,9 @@ class ShellOrchestrator:
             self._vuln_http_log_fh.flush()
 
     def _build_tech_set(self, server_info):
-        """Build a lowercase set of all detected technologies for filtering."""
+        """Build a lowercase set of all detected technologies for filtering.
+        Merges basic detection + Wappalyzer results into a unified keyword set.
+        """
         techs = set()
         for key in ("technologies", "cms", "frameworks", "js_frameworks", "waf", "cdn"):
             for t in server_info.get(key, []):
@@ -486,21 +515,69 @@ class ShellOrchestrator:
             val = server_info.get(key, "")
             if val:
                 techs.add(val.lower())
-        body = server_info.get("_body", "")
-        if body:
-            bl = body.lower()
-            for probe in ["php", "asp.net", "java", "ruby", "python", "node"]:
-                if probe in bl:
-                    techs.add(probe)
+
+        for det in server_info.get("wappalyzer", []):
+            techs.add(det["name"].lower())
+            for cat in det.get("categories", []):
+                cat_lower = cat.lower()
+                if "java" in cat_lower and "javascript" not in cat_lower:
+                    techs.add("java")
+                if cat == "Programming languages":
+                    techs.add(det["name"].lower())
+
+        _LANG_ALIASES = {
+            "node.js": "node.js", "express": "node.js",
+            "next.js": "node.js", "nuxt.js": "node.js",
+            "koa": "node.js", "fastify": "node.js",
+            "php": "php", "laravel": "php", "symfony": "php",
+            "codeigniter": "php", "cakephp": "php", "wordpress": "php",
+            "drupal": "php", "joomla": "php", "magento": "php",
+            "ruby on rails": "ruby", "ruby": "ruby",
+            "django": "python", "flask": "python", "tornado": "python",
+            "pyramid": "python", "python": "python",
+            "java": "java", "apache tomcat": "java", "apache struts": "java",
+            "spring": "java", "jboss": "java", "wildfly": "java",
+            "glassfish": "java", "weblogic": "java", "jetty": "java",
+            "jsp": "java", "jsf": "java",
+            "asp.net": ".net", "iis": ".net",
+            "coldfusion": "coldfusion", "adobe coldfusion": "coldfusion",
+            "lucee": "coldfusion",
+        }
+        expanded = set()
+        for t in techs:
+            lang = _LANG_ALIASES.get(t)
+            if lang:
+                expanded.add(lang)
+        techs.update(expanded)
+
         self._detected_techs = techs
+        tokens = set()
+        for t in techs:
+            tokens.add(t)
+            for part in re.split(r'[\s/,;]+', t):
+                if len(part) > 1:
+                    tokens.add(part)
+        self._detected_tech_tokens = tokens
         return techs
+
+    def _tech_keywords_match(self, keywords):
+        """Check if ANY keyword from a filter rule matches the detected stack.
+        Uses exact token match against _detected_tech_tokens to avoid
+        substring false positives (e.g. 'gin' matching 'nginx').
+        """
+        return bool(self._detected_tech_tokens & set(keywords))
 
     def _script_matches_tech(self, script_name):
         """Check if a script is relevant to detected tech stack."""
         name_lower = script_name.lower().replace(".script", "")
+
+        if name_lower in SCRIPT_TECH_MAP:
+            return self._tech_keywords_match(SCRIPT_TECH_MAP[name_lower])
+
         for prefix, keywords in TECH_FILTER.items():
             if name_lower.startswith(prefix):
-                return any(kw in t for kw in keywords for t in self._detected_techs)
+                return self._tech_keywords_match(keywords)
+
         return True
 
     def _list_scripts(self, phase_dir, filter_tech=False):
@@ -1054,7 +1131,8 @@ class ShellOrchestrator:
         # Build tech filter set from detected stack
         tech_set = self._build_tech_set(server_info)
         if tech_set:
-            print(f"  {C.dim('[FILTER] Script filter: ')}{C.CYN}{', '.join(sorted(tech_set)[:15])}{C.RST}")
+            display = sorted(t for t in tech_set if '/' not in t and len(t) > 2)[:12]
+            print(f"  {C.dim('[FILTER] Stack: ')}{C.CYN}{', '.join(display)}{C.RST}")
 
         # Phase 0.3: Soft 404 Calibration
         print(f"\n  {C.info('[SOFT404]')} Calibrating custom error page detection")
