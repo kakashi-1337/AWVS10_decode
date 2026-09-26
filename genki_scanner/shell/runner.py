@@ -753,7 +753,8 @@ class ShellOrchestrator:
             print(f"    {C.warn('[CATCHALL]')} Detected catch-all response: {ctype} ({csize}B) - filtering false positives")
 
         found = []
-        git_confirmed = False
+        git_head_ok = False
+        git_config_ok = False
         for path, url, resp in raw_responses:
             status = resp.status_code
             if status not in (200, 301, 302, 403):
@@ -803,12 +804,15 @@ class ShellOrchestrator:
                 print(f"      {C.dim('Evidence: ' + evidence[:120])}")
             found.append(entry)
 
-            if finding_type == "git_exposed" and ".git/HEAD" in path:
-                git_confirmed = True
+            if finding_type == "git_exposed":
+                if ".git/HEAD" in path:
+                    git_head_ok = True
+                elif ".git/config" in path:
+                    git_config_ok = True
 
         print(f"    {C.ok('[DONE]')} {C.bold(str(len(found)))} verified paths found")
 
-        if git_confirmed:
+        if git_head_ok and git_config_ok:
             self._git_dump(base, headers, delay)
 
         return found
@@ -2087,11 +2091,13 @@ def _matches_catchall(resp, catchall_sig):
 
 CONTENT_VALIDATORS = {
     ".git/HEAD": {
-        "require_content": [r"ref:\s+refs/"],
+        "require_any": [r"^ref:\s+refs/heads/\S+\s*$", r"^[0-9a-f]{40}\s*$"],
+        "reject_html": True, "max_size": 512,
         "severity": "high", "type": "git_exposed",
     },
     ".git/config": {
-        "require_content": [r"\[core\]"],
+        "require_content": [r"\[core\]", r"(?:repositoryformatversion|filemode|bare|logallrefupdates)\s*="],
+        "reject_html": True, "max_size": 10000,
         "severity": "high", "type": "git_exposed",
     },
     ".svn/entries": {
@@ -2293,6 +2299,8 @@ def _validate_finding(path, body, status, headers):
         if validator.get("reject_html") and is_html and status == 200:
             return None
         if validator.get("min_size") and len(body) < validator["min_size"]:
+            return None
+        if validator.get("max_size") and len(body) > validator["max_size"]:
             return None
 
         if validator.get("require_json"):
