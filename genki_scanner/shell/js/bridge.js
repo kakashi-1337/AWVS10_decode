@@ -520,6 +520,16 @@ function isCatchallResponse(body, status) {
 // ---- Global Functions (matching AWVS engine) ----
 
 function AddReportItem(ri) {
+    const httpInfo = ri._httpInfo || null;
+    if (httpInfo && httpInfo.status === 200 && httpInfo.responseBody) {
+        if (isCatchallResponse(httpInfo.responseBody, 200)) {
+            _output('catchall_filtered', {
+                name: ri.name || ri.Name || '',
+                affects: ri.affects || ri.Affects || '',
+            });
+            return;
+        }
+    }
     const finding = {
         name: ri.name || ri.Name || '',
         severity: ri.severity || 'medium',
@@ -529,7 +539,7 @@ function AddReportItem(ri) {
         parameterValue: ri.parameterValue || '',
         details: ri.details || ri.Details || '',
         xmlFile: ri._xmlFile || '',
-        httpInfo: ri._httpInfo || null,
+        httpInfo: httpInfo,
         timestamp: new Date().toISOString(),
     };
     SHELL_STATE.findings.push(finding);

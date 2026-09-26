@@ -341,6 +341,9 @@ class NodeRuntime:
             elif msg["type"] == "http_log":
                 if callback:
                     callback("http_log", msg["data"])
+            elif msg["type"] == "catchall_filtered":
+                if callback:
+                    callback("catchall_filtered", msg["data"])
             elif msg["type"] == "trace":
                 if self.verbose and callback:
                     callback("trace", msg["data"])
@@ -490,6 +493,7 @@ class ShellOrchestrator:
         self._vuln_http_log_fh = None
         self._dir_enum_progress = {"done": 0, "total": 0, "found": 0, "status": "idle"}
         self._last_server_info = {}
+        self._catchall_sig = None
 
     def _init_scan_dir(self, target_url):
         parsed = urlparse(target_url)
@@ -669,6 +673,25 @@ class ShellOrchestrator:
 
             info["banner"] = resp_headers.get("Server", "")
             info["poweredby"] = resp_headers.get("X-Powered-By", "")
+
+            if not info["banner"] and tech_result.get("technologies"):
+                for tech in tech_result["technologies"]:
+                    tl = tech.lower()
+                    if "nginx" in tl:
+                        info["banner"] = "Nginx"
+                        break
+                    elif "apache" in tl and "tomcat" not in tl:
+                        info["banner"] = "Apache"
+                        break
+                    elif "iis" in tl:
+                        info["banner"] = "IIS"
+                        break
+                    elif "litespeed" in tl:
+                        info["banner"] = "LiteSpeed"
+                        break
+                    elif "caddy" in tl:
+                        info["banner"] = "Caddy"
+                        break
             info["technologies"] = tech_result["technologies"]
             info["waf"] = tech_result["waf"]
             info["platform_os"] = tech_result["os"]
@@ -708,6 +731,36 @@ class ShellOrchestrator:
             print(f"  {C.warn('[WARN]')} Server probe failed: {e}")
 
         return info
+
+    def _detect_catchall_early(self, target_url):
+        """Detect SPA/catch-all by probing random nonexistent paths before scripts run."""
+        import requests
+        import uuid
+        headers = self.config.get("headers", {})
+        base = target_url.rstrip("/")
+        probes = [
+            f"/{uuid.uuid4().hex[:12]}",
+            f"/{uuid.uuid4().hex[:8]}.txt",
+            f"/{uuid.uuid4().hex[:10]}/",
+            f"/_{uuid.uuid4().hex[:6]}.php",
+            f"/{uuid.uuid4().hex[:8]}.json",
+            f"/{uuid.uuid4().hex[:7]}.xml",
+        ]
+        responses = []
+        delay = self.config.get("delay", 1.0) * 0.3
+        for path in probes:
+            try:
+                resp = requests.get(
+                    f"{base}{path}", timeout=8, verify=False,
+                    allow_redirects=False, headers=headers,
+                )
+                responses.append((path, f"{base}{path}", resp))
+                time.sleep(delay)
+            except Exception:
+                pass
+        if not responses:
+            return None
+        return _detect_catchall(responses)
 
     def _port_scan(self, hostname, ports=None):
         ports = ports or COMMON_PORTS
@@ -1249,6 +1302,8 @@ class ShellOrchestrator:
             "serverInfo": server_info,
             "oobDomain": self.oob_domain,
         }
+        if self._catchall_sig:
+            ctx["catchallSignature"] = self._catchall_sig
         if "siteTree" in extra and extra["siteTree"] and hasattr(extra["siteTree"], 'to_js_object'):
             extra["siteTree"] = extra["siteTree"].to_js_object()
         ctx.update(extra)
@@ -1274,9 +1329,33 @@ class ShellOrchestrator:
             return ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"][min(sev, 4)]
         return str(sev).upper()
 
+    def _is_catchall_finding(self, data):
+        """Check if a script finding is a SPA catch-all false positive."""
+        if not self._catchall_sig:
+            return False
+        http_info = data.get("httpInfo")
+        if not http_info:
+            return False
+        status = http_info.get("status", 0)
+        body = http_info.get("responseBody", "")
+        if status != 200 or not body:
+            return False
+        sig = self._catchall_sig
+        body_bytes = body.encode("utf-8", errors="replace")
+        if sig["type"] == "hash":
+            return hashlib.sha256(body_bytes).hexdigest() == sig["hash"]
+        if sig["type"] == "size":
+            return abs(len(body_bytes) - sig["size"]) <= sig.get("tolerance", 50)
+        return False
+
     def _on_script_event(self, event_type, data):
         debug = self.config.get("debug", False)
         if event_type == "finding":
+            if self._is_catchall_finding(data):
+                name = data.get("name", "?")
+                if debug or self.config.get("verbose"):
+                    print(f"    {C.dim(f'[CATCHALL] Suppressed false positive: {name}')}")
+                return
             if not self._add_finding(data):
                 return
             sev = self._severity_label(data.get("severity", 0))
@@ -1303,6 +1382,10 @@ class ShellOrchestrator:
                     for line in stack.split("\n")[:5]:
                         print(f"      {C.dim(line)}")
             self.stats["errors"] += 1
+        elif event_type == "catchall_filtered":
+            name = data.get("name", "?")
+            if debug or self.config.get("verbose"):
+                print(f"    {C.dim(f'[CATCHALL] Suppressed: {name}')}")
         elif event_type == "progress":
             pass
 
@@ -1436,6 +1519,14 @@ class ShellOrchestrator:
             print(f"  {C.info('[SOFT404]')} {C.bold(str(len(self.soft404._fingerprints)))} fingerprints captured")
         else:
             print(f"  {C.info('[SOFT404]')} No custom 404 pages detected {C.dim('(server returns real 404s)')}")
+
+        # Phase 0.4: SPA / Catch-all Detection
+        self._catchall_sig = self._detect_catchall_early(target_url)
+        if self._catchall_sig:
+            csize = self._catchall_sig.get("size", 0)
+            print(f"  {C.warn('[CATCHALL]')} SPA/catch-all detected ({csize}B) - script findings will be validated")
+        else:
+            print(f"  {C.dim('[CATCHALL] No catch-all behavior detected')}")
 
         # Phase 0.5: Port Scan
         parsed = urlparse(target_url)
@@ -1951,6 +2042,8 @@ class ShellOrchestrator:
     def _on_script_event_quiet(self, event_type, data):
         """Event handler for silent mode -- still collect findings."""
         if event_type == "finding":
+            if self._is_catchall_finding(data):
+                return
             if not self._add_finding(data):
                 return
             sev = self._severity_label(data.get("severity", 0))

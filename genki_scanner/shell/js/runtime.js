@@ -197,6 +197,9 @@ function executeScript(scriptPath, scriptsDir, context) {
     if (context.cookies !== undefined) {
         bridge.SHELL_STATE.cookies = context.cookies;
     }
+    if (context.catchallSignature) {
+        bridge.SHELL_STATE._catchallTracker.signature = context.catchallSignature;
+    }
 
     bridge.SHELL_STATE._currentScript = path.basename(scriptPath);
     const vmContext = vm.createContext(sandbox);
@@ -241,6 +244,7 @@ function handleCommand(cmd) {
             if (cmd.directory) bridge.SHELL_STATE.currentDirectory = cmd.directory;
             if (cmd.serverInfo) bridge.SHELL_STATE.serverInfo = cmd.serverInfo;
             if (cmd.siteTree) bridge.SHELL_STATE.siteTree = cmd.siteTree;
+            if (cmd.catchallSignature) bridge.SHELL_STATE._catchallTracker.signature = cmd.catchallSignature;
             if (cmd.globalValues) {
                 Object.assign(bridge.SHELL_STATE.globalValues, cmd.globalValues);
             }
@@ -260,7 +264,8 @@ function handleCommand(cmd) {
         case 'clear_findings': {
             bridge.SHELL_STATE.findings = [];
             bridge.SHELL_STATE.kbase = [];
-            bridge.SHELL_STATE._catchallTracker = { hashes: {}, sizes: {}, total: 0, signature: null };
+            const savedSig = bridge.SHELL_STATE._catchallTracker.signature;
+            bridge.SHELL_STATE._catchallTracker = { hashes: {}, sizes: {}, total: 0, signature: savedSig };
             output('ack', { action: 'clear_findings' });
             break;
         }
