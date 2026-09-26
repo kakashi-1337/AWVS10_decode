@@ -488,6 +488,8 @@ class ShellOrchestrator:
         self._scan_dir = None
         self._http_log_fh = None
         self._vuln_http_log_fh = None
+        self._dir_enum_progress = {"done": 0, "total": 0, "found": 0, "status": "idle"}
+        self._last_server_info = {}
 
     def _init_scan_dir(self, target_url):
         parsed = urlparse(target_url)
@@ -732,9 +734,11 @@ class ShellOrchestrator:
 
         return open_ports
 
-    def _dir_enum(self, target_url, server_info):
+    def _dir_enum(self, target_url, server_info, background=False):
         wordlist = _build_stack_wordlist(server_info, self._detected_techs)
-        print(f"\n  {C.info('[DIRS]')} Checking {len(wordlist)} paths (stack-tuned)")
+        total = len(wordlist)
+        label = "[DIRS:BG]" if background else "[DIRS]"
+        print(f"\n  {C.info(label)} Checking {total} paths (stack-tuned)")
 
         import requests
         base = target_url.rstrip("/")
@@ -745,7 +749,9 @@ class ShellOrchestrator:
 
         raw_responses = []
         blocked_paths = []
-        for path in wordlist:
+        self._dir_enum_progress = {"done": 0, "total": total, "found": 0, "status": "fuzzing"}
+
+        for i, path in enumerate(wordlist):
             try:
                 url = f"{base}/{path}"
                 resp = requests.get(
@@ -762,10 +768,25 @@ class ShellOrchestrator:
             except Exception:
                 pass
 
+            self._dir_enum_progress["done"] = i + 1
+            interval = 25 if total < 200 else 100 if total < 1000 else 250 if total < 5000 else 500
+            if not debug and (i + 1) % interval == 0:
+                pct = int((i + 1) / total * 100)
+                hits = self._dir_enum_progress["found"]
+                bar_len = 20
+                filled = int(bar_len * pct / 100)
+                bar = f"{'#' * filled}{'-' * (bar_len - filled)}"
+                print(f"    {C.dim(f'{label} [{bar}] {pct}% ({i+1}/{total}) | {hits} found')}")
+
+        self._dir_enum_progress["status"] = "bypass"
         if blocked_paths:
+            sens_count = sum(1 for p, _, _ in blocked_paths if _resolve_validator(p[0] if isinstance(p, tuple) else p))
+            if sens_count:
+                print(f"    {C.dim(f'{label} Bypass probes on {len(blocked_paths)} blocked paths...')}")
             bypass_hits = self._url_rewrite_bypass(blocked_paths, base, headers, delay, verbose)
             raw_responses.extend(bypass_hits)
 
+        self._dir_enum_progress["status"] = "validating"
         catchall_sig = _detect_catchall(raw_responses)
         if catchall_sig:
             ctype = catchall_sig.get("type", "unknown")
@@ -823,6 +844,7 @@ class ShellOrchestrator:
                 "phase": "DirEnum",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
+            self._dir_enum_progress["found"] += 1
             bypass_tag = f" {C.BYLW}[BYPASS:{bypass_method}]{C.RST}" if bypass_method else ""
             print(f"    {C.sev_color(sev.upper())}[!] [{sev.upper()}]{C.RST} {path} ({status}, {size}B) - {finding_type}{bypass_tag}")
             if evidence and verbose:
@@ -835,7 +857,8 @@ class ShellOrchestrator:
                 elif ".git/config" in path:
                     git_config_ok = True
 
-        print(f"    {C.ok('[DONE]')} {C.bold(str(len(found)))} verified paths found")
+        self._dir_enum_progress["status"] = "done"
+        print(f"    {C.ok(f'{label} DONE')} {C.bold(str(len(found)))} verified paths found")
 
         if git_head_ok and git_config_ok:
             self._git_dump(base, headers, delay)
@@ -1434,10 +1457,28 @@ class ShellOrchestrator:
         if HAS_JS_RECON and (not phases or "jsrecon" in (phases or [])):
             self._run_js_recon(target_url, server_info)
 
-        # Phase 1.5: Directory Enumeration
+        # Phase 1.5: Directory Enumeration (background if full scan, foreground if dirs-only)
+        import threading
+        dir_thread = None
+        dirs_only = phases and phases == ["dirs"]
+        self._dir_enum_progress = {"done": 0, "total": 0, "found": 0, "status": "idle"}
+
         if not phases or "dirs" in (phases or []):
-            dir_results = self._dir_enum(target_url, server_info)
-            server_info["directories"] = dir_results
+            if dirs_only:
+                dir_results = self._dir_enum(target_url, server_info)
+                server_info["directories"] = dir_results
+            else:
+                def _bg_dir_enum():
+                    try:
+                        results = self._dir_enum(target_url, server_info, background=True)
+                        server_info["directories"] = results
+                    except Exception as e:
+                        print(f"    {C.warn('[DIRS:BG]')} Error: {e}")
+                        server_info["directories"] = []
+
+                dir_thread = threading.Thread(target=_bg_dir_enum, daemon=True)
+                dir_thread.start()
+                print(f"  {C.dim('[DIRS:BG] Running in background while scan continues...')}")
 
         # Phase 1.7: Build Site Tree (from browser crawl or basic HTTP extraction)
         site_tree = self._build_site_tree(target_url, server_info)
@@ -1455,6 +1496,14 @@ class ShellOrchestrator:
 
         if "WebApps" in active_phases or not phases:
             self._run_phase("WebApps", "webapps", target_url, server_info, site_tree)
+
+        if dir_thread and dir_thread.is_alive():
+            prog = self._dir_enum_progress
+            pct = int(prog["done"] / max(prog["total"], 1) * 100)
+            print(f"\n  {C.info('[DIRS:BG]')} Waiting for fuzzing to finish ({pct}% done)...")
+            dir_thread.join()
+        elif dir_thread:
+            print(f"\n  {C.ok('[DIRS:BG]')} Fuzzing completed during scan")
 
         # Phase 3: HTTP Smuggling / Desync Probes
         if HAS_SMUGGLER and (not phases or "smuggler" in (phases or [])):
