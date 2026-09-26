@@ -21,13 +21,13 @@ def _load_db():
     for fname in sorted(os.listdir(_DB_DIR)):
         if fname == "categories.json" or not fname.endswith(".json"):
             continue
-        with open(os.path.join(_DB_DIR, fname)) as f:
+        with open(os.path.join(_DB_DIR, fname), encoding="utf-8", errors="replace") as f:
             _db_cache.update(json.load(f))
 
     cats_path = os.path.join(_DB_DIR, "categories.json")
     _cats_cache = {}
     if os.path.exists(cats_path):
-        with open(cats_path) as f:
+        with open(cats_path, encoding="utf-8", errors="replace") as f:
             _cats_cache = json.load(f)
 
     return _db_cache, _cats_cache

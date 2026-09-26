@@ -2101,6 +2101,93 @@ _TECH_TO_WORDLIST = {
 }
 
 
+_SECLIST_STACK_FILES = {
+    "core": [
+        "Discovery/Web-Content/common.txt",
+        "Discovery/Web-Content/raft-small-files.txt",
+    ],
+    "php": [
+        "Discovery/Web-Content/Common-PHP-Filenames.txt",
+    ],
+    "wordpress": [
+        "Discovery/Web-Content/CMS/wordpress.fuzz.txt",
+        "Discovery/Web-Content/CMS/wp-plugins.fuzz.txt",
+        "Discovery/Web-Content/CMS/wp-themes.fuzz.txt",
+    ],
+    "drupal": [
+        "Discovery/Web-Content/CMS/drupal.txt",
+    ],
+    "joomla": [
+        "Discovery/Web-Content/CMS/joomla-plugins.txt",
+        "Discovery/Web-Content/CMS/joomla-tests.txt",
+    ],
+    "java": [
+        "Discovery/Web-Content/tomcat.txt",
+        "Discovery/Web-Content/spring-boot.txt",
+    ],
+    ".net": [
+        "Discovery/Web-Content/iis.txt",
+        "Discovery/Web-Content/IIS.fuzz.txt",
+    ],
+    "node.js": [
+        "Discovery/Web-Content/nodejs.txt",
+    ],
+    "ruby": [
+        "Discovery/Web-Content/ror.txt",
+        "Discovery/Web-Content/ruby.txt",
+    ],
+    "coldfusion": [
+        "Discovery/Web-Content/coldfusion.txt",
+    ],
+    "apache": [
+        "Discovery/Web-Content/apache.txt",
+        "Discovery/Web-Content/Apache.fuzz.txt",
+    ],
+    "nginx": [
+        "Discovery/Web-Content/nginx.txt",
+    ],
+    "cgi": [
+        "Discovery/Web-Content/CGIs.txt",
+    ],
+}
+
+_seclist_cache = {}
+
+def _find_seclist_dir():
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "SecList"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "SecLists"),
+        os.path.expanduser("~/SecLists"),
+        os.path.expanduser("~/SecList"),
+        "/opt/SecLists",
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
+
+def _load_seclist_file(seclist_dir, rel_path):
+    cache_key = f"{seclist_dir}/{rel_path}"
+    if cache_key in _seclist_cache:
+        return _seclist_cache[cache_key]
+
+    full = os.path.join(seclist_dir, rel_path)
+    lines = []
+    if os.path.isfile(full):
+        try:
+            with open(full, "r", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        if line.startswith("/"):
+                            line = line[1:]
+                        lines.append(line)
+        except Exception:
+            pass
+    _seclist_cache[cache_key] = lines
+    return lines
+
+
 def _build_stack_wordlist(server_info, detected_techs):
     paths = list(STACK_WORDLISTS["core"])
     used_lists = set()
@@ -2116,6 +2203,31 @@ def _build_stack_wordlist(server_info, detected_techs):
         if wl_key and wl_key not in used_lists:
             used_lists.add(wl_key)
             paths.extend(STACK_WORDLISTS.get(wl_key, []))
+
+    seclist_dir = _find_seclist_dir()
+    if seclist_dir:
+        sl_loaded = 0
+        for sl_file in _SECLIST_STACK_FILES.get("core", []):
+            entries = _load_seclist_file(seclist_dir, sl_file)
+            paths.extend(entries)
+            sl_loaded += len(entries)
+
+        for wl_key in used_lists:
+            for sl_file in _SECLIST_STACK_FILES.get(wl_key, []):
+                entries = _load_seclist_file(seclist_dir, sl_file)
+                paths.extend(entries)
+                sl_loaded += len(entries)
+
+        web_server = server_info.get("web_server", "").lower()
+        for srv_key in ("apache", "nginx", "cgi"):
+            if srv_key in web_server and srv_key not in used_lists:
+                for sl_file in _SECLIST_STACK_FILES.get(srv_key, []):
+                    entries = _load_seclist_file(seclist_dir, sl_file)
+                    paths.extend(entries)
+                    sl_loaded += len(entries)
+
+        if sl_loaded > 0:
+            print(f"    {C.dim(f'[SecList] Loaded {sl_loaded} paths from {seclist_dir}')}")
 
     seen = set()
     unique = []
