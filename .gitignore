@@ -7,3 +7,5 @@ build/
 .env
 *.json
 !package.json
+!genki_scanner/shell/wappalyzer/*.json
+scans/

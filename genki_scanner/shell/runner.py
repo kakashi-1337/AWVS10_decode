@@ -29,6 +29,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from .tech_detect import detect_technologies, WAF_SIGNATURES
 from .site_tree import SiteTree, Scheme, SiteFile
 from . import colors as C
+from .wappalyzer import detect as wap_detect, categorize as wap_categorize
 
 
 PHASE_ORDER = [
@@ -566,6 +567,30 @@ class ShellOrchestrator:
             info["status_code"] = resp.status_code
             info["_body"] = resp.text
 
+            wap_results = wap_detect(resp_headers, resp.text, cookies_str, target_url)
+            wap_groups = wap_categorize(wap_results)
+            info["wappalyzer"] = wap_results
+            info["wappalyzer_groups"] = wap_groups
+
+            for det in wap_results:
+                name = det["name"]
+                if name not in info["technologies"]:
+                    info["technologies"].append(name)
+                for cat in det["categories"]:
+                    if cat in ("Web frameworks",) and name not in info["frameworks"]:
+                        info["frameworks"].append(name)
+                    elif cat in ("JavaScript frameworks", "JavaScript libraries") and name not in info["js_frameworks"]:
+                        info["js_frameworks"].append(name)
+                    elif cat in ("CMS", "Ecommerce", "Blogs") and name not in info["cms"]:
+                        info["cms"].append(name)
+                    elif cat in ("CDN", "PaaS", "Hosting") and name not in info["cdn"]:
+                        info["cdn"].append(name)
+                    elif cat == "Programming languages":
+                        if name.lower() not in [t.lower() for t in info["technologies"]]:
+                            info["technologies"].append(name)
+                    elif cat == "Security" and name not in info["waf"]:
+                        info["waf"].append(name)
+
         except Exception as e:
             print(f"  {C.warn('[WARN]')} Server probe failed: {e}")
 
@@ -985,28 +1010,51 @@ class ShellOrchestrator:
         print(f"\n{C.BOLD}[TARGET]{C.RST} {C.CYN}{target_url}{C.RST}")
         print(f"{C.DIM}{'-' * 50}{C.RST}")
 
-        # Phase 0: Technology Detection
-        print(f"\n  {C.BMAG}[PHASE 0]{C.RST} Technology Detection")
+        # Phase 0: Technology Detection (Wappalyzer + custom signatures)
+        print(f"\n  {C.BMAG}[PHASE 0]{C.RST} Technology Detection {C.DIM}(Wappalyzer 7600+ fingerprints){C.RST}")
         server_info = self._detect_server(target_url)
+        self._last_server_info = server_info
         print(f"  Server: {C.bold(server_info.get('banner', 'Unknown'))}")
         print(f"  OS: {C.bold(server_info.get('platform_os', 'Unknown'))}")
         if server_info.get("poweredby"):
             print(f"  Powered: {C.YLW}{server_info['poweredby']}{C.RST}")
-        if server_info.get("technologies"):
-            print(f"  Tech: {C.CYN}{', '.join(server_info['technologies'])}{C.RST}")
+
+        wap_results = server_info.get("wappalyzer", [])
+        if wap_results:
+            wap_groups = server_info.get("wappalyzer_groups", {})
+            for group, techs in wap_groups.items():
+                labels = []
+                for t in techs:
+                    label = t["name"]
+                    if t["version"]:
+                        label += f" {t['version']}"
+                    labels.append(label)
+                group_colors = {
+                    "server": C.BOLD, "framework": C.BLU,
+                    "cms": C.MAG, "language": C.CYN,
+                    "js_framework": C.YLW, "cdn_proxy": C.DIM,
+                    "security": C.RED, "analytics": C.DIM,
+                }
+                color = group_colors.get(group, C.CYN)
+                print(f"  {group.replace('_', ' ').title()}: {color}{', '.join(labels)}{C.RST}")
+            print(f"  {C.DIM}[WAP] {len(wap_results)} technologies identified{C.RST}")
+        else:
+            if server_info.get("technologies"):
+                print(f"  Tech: {C.CYN}{', '.join(server_info['technologies'])}{C.RST}")
+            if server_info.get("frameworks"):
+                print(f"  Frameworks: {C.BLU}{', '.join(server_info['frameworks'])}{C.RST}")
+            if server_info.get("js_frameworks"):
+                print(f"  JS: {C.YLW}{', '.join(server_info['js_frameworks'])}{C.RST}")
+
         if server_info.get("waf"):
             print(f"  WAF: {C.RED}{', '.join(server_info['waf'])}{C.RST}")
         if server_info.get("cms"):
             print(f"  CMS: {C.MAG}{', '.join(server_info['cms'])}{C.RST}")
-        if server_info.get("frameworks"):
-            print(f"  Frameworks: {C.BLU}{', '.join(server_info['frameworks'])}{C.RST}")
-        if server_info.get("js_frameworks"):
-            print(f"  JS Frameworks: {C.YLW}{', '.join(server_info['js_frameworks'])}{C.RST}")
 
         # Build tech filter set from detected stack
         tech_set = self._build_tech_set(server_info)
         if tech_set:
-            print(f"  {C.dim(f'[FILTER] Script filter active: ')}{C.CYN}{', '.join(sorted(tech_set)[:10])}{C.RST}")
+            print(f"  {C.dim('[FILTER] Script filter: ')}{C.CYN}{', '.join(sorted(tech_set)[:15])}{C.RST}")
 
         # Phase 0.3: Soft 404 Calibration
         print(f"\n  {C.info('[SOFT404]')} Calibrating custom error page detection")
@@ -1333,6 +1381,26 @@ class ShellOrchestrator:
             return
         summary_path = os.path.join(self._scan_dir, "summary.json")
         self.save_results(summary_path)
+
+        if hasattr(self, '_last_server_info') and self._last_server_info:
+            tech_path = os.path.join(self._scan_dir, "tech_stack.json")
+            wap = self._last_server_info.get("wappalyzer", [])
+            tech_data = {
+                "banner": self._last_server_info.get("banner", ""),
+                "os": self._last_server_info.get("platform_os", ""),
+                "technologies": self._last_server_info.get("technologies", []),
+                "frameworks": self._last_server_info.get("frameworks", []),
+                "js_frameworks": self._last_server_info.get("js_frameworks", []),
+                "cms": self._last_server_info.get("cms", []),
+                "cdn": self._last_server_info.get("cdn", []),
+                "waf": self._last_server_info.get("waf", []),
+                "wappalyzer": [{"name": t["name"], "version": t["version"],
+                                "confidence": t["confidence"], "categories": t["categories"]}
+                               for t in wap],
+            }
+            with open(tech_path, "w") as f:
+                json.dump(tech_data, f, indent=2)
+            print(f"{C.BGRN}[SAVED]{C.RST} Tech stack -> {C.bold(tech_path)} {C.DIM}({len(wap)} wappalyzer detections){C.RST}")
         http_path = os.path.join(self._scan_dir, "http_raw.jsonl")
         vuln_path = os.path.join(self._scan_dir, "vuln_http_raw.jsonl")
         http_count = 0
