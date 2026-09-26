@@ -1325,8 +1325,18 @@ class ShellOrchestrator:
         print(f"\n  {C.BMAG}[PHASE 0]{C.RST} Technology Detection {C.DIM}(Wappalyzer 7600+ fingerprints){C.RST}")
         server_info = self._detect_server(target_url)
         self._last_server_info = server_info
-        print(f"  Server: {C.bold(server_info.get('banner', 'Unknown'))}")
-        print(f"  OS: {C.bold(server_info.get('platform_os', 'Unknown'))}")
+        banner = server_info.get("banner", "")
+        resp_hdrs = server_info.get("response_headers", {})
+        raw_server = resp_hdrs.get("Server", "") if resp_hdrs else ""
+        if banner and not raw_server:
+            print(f"  Server: {C.bold(banner)} {C.DIM}(inferred from headers){C.RST}")
+        else:
+            print(f"  Server: {C.bold(banner or 'Unknown')}")
+        os_val = server_info.get("platform_os", "Unknown")
+        if os_val != "Unknown" and not raw_server:
+            print(f"  OS: {C.bold(os_val)} {C.DIM}(inferred){C.RST}")
+        else:
+            print(f"  OS: {C.bold(os_val)}")
         if server_info.get("poweredby"):
             print(f"  Powered: {C.YLW}{server_info['poweredby']}{C.RST}")
 

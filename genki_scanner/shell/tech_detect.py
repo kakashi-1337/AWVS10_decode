@@ -108,22 +108,45 @@ TECH_SIGNATURES = {
             r'/media/jui/', r'/templates/',
             r'<meta name="generator" content="Joomla',
         ],
-        "React": [r'__NEXT_DATA__', r'_reactRootContainer', r'react-root', r'data-reactroot'],
-        "Angular": [r'ng-version', r'ng-app', r'data-ng-app', r'angular\.min\.js'],
-        "Vue.js": [r'__vue__', r'v-cloak', r'data-v-', r'vue\.min\.js', r'vue\.js'],
-        "Svelte": [r'__svelte', r'svelte-'],
+        "React": [
+            r'__NEXT_DATA__', r'_reactRootContainer', r'react-root', r'data-reactroot',
+            r'static/js/main\.[a-f0-9]+\.js',
+            r'<div\s+id=["\']root["\']>\s*</div>',
+            r'react\.production\.min\.js', r'react-dom',
+        ],
+        "Angular": [
+            r'ng-version', r'ng-app', r'data-ng-app', r'angular\.min\.js',
+            r'<app-root[^>]*>',
+            r'runtime\.[a-f0-9]+\.js', r'polyfills\.[a-f0-9]+\.js',
+            r'main\.[a-f0-9]+\.js.*?polyfills\.[a-f0-9]+\.js',
+        ],
+        "Vue.js": [
+            r'__vue__', r'v-cloak', r'data-v-[a-f0-9]', r'vue\.min\.js', r'vue\.js',
+            r'chunk-vendors\.[a-f0-9]+\.js',
+            r'<div\s+id=["\']app["\']>\s*</div>',
+            r'/js/app\.[a-f0-9]+\.js',
+            r'/css/app\.[a-f0-9]+\.css',
+        ],
+        "Vite": [
+            r'/@vite/', r'type=["\']module["\'].*?/assets/index-[a-f0-9]+\.js',
+            r'/assets/index-[a-f0-9]+\.(js|css)',
+        ],
+        "Svelte": [r'__svelte', r'svelte-', r'_app/immutable/'],
+        "SvelteKit": [r'_app/immutable/', r'__sveltekit'],
         "jQuery": [r'jquery\.min\.js', r'jquery-\d+\.\d+'],
         "Bootstrap": [r'bootstrap\.min\.(css|js)', r'class="(container|row|col-)'],
         "Tailwind CSS": [r'tailwindcss', r'class="[^"]*\b(flex|grid|bg-|text-|p-|m-)\b'],
         "Next.js": [r'__NEXT_DATA__', r'_next/static', r'/_next/'],
         "Nuxt": [r'__NUXT__', r'_nuxt/'],
         "Gatsby": [r'gatsby-', r'___gatsby'],
+        "Remix": [r'__remixContext', r'__remix'],
         "GraphQL": [r'/graphql', r'__schema', r'query\s*\{'],
         "Firebase": [r'firebaseapp\.com', r'firebase\.js'],
         "Stripe": [r'js\.stripe\.com', r'stripe-js'],
         "reCAPTCHA": [r'google\.com/recaptcha', r'grecaptcha'],
         "hCaptcha": [r'hcaptcha\.com', r'h-captcha'],
         "Cloudflare Turnstile": [r'challenges\.cloudflare\.com/turnstile'],
+        "Webpack": [r'webpackJsonp', r'__webpack_require__', r'webpack\.runtime'],
     },
     "meta_generators": {
         "WordPress": "wordpress",
@@ -274,11 +297,21 @@ def detect_technologies(resp_headers, resp_body, cookies_str=""):
     server_val = headers_lower.get("server", "")
     result["server"] = server_val
 
+    if not server_val:
+        inferred = _infer_server_from_headers(headers_lower)
+        if inferred:
+            result["server"] = inferred
+            server_val = inferred
+            _add_tech(result, inferred.split("/")[0])
+
     for os_name, sigs in TECH_SIGNATURES["os_detection"].items():
         for h in sigs.get("headers", []):
             if h in server_val or h in headers_lower.get("x-powered-by", ""):
                 result["os"] = os_name
                 break
+
+    if result["os"] == "Unknown" and server_val:
+        result["os"] = _infer_os(server_val, headers_lower)
 
     for waf_name, sigs in WAF_SIGNATURES.items():
         detected = False
@@ -325,3 +358,67 @@ def _add_tech(result, tech):
         result["js_frameworks"].append(tech)
     if tech in cdn_list and tech not in result["cdn"]:
         result["cdn"].append(tech)
+
+
+def _infer_server_from_headers(headers_lower):
+    """Infer web server when Server header is missing, using ETag format and header fingerprints."""
+    etag = headers_lower.get("etag", "")
+
+    if etag:
+        if re.match(r'^[wW]/"[0-9a-f]+-[0-9a-f]+"$', etag):
+            return "Nginx"
+        if re.match(r'^"[0-9a-f]+-[0-9a-f]+-[0-9a-f]+"$', etag):
+            return "Apache"
+        if re.match(r'^"[0-9a-f]{20,}"$', etag):
+            return "IIS"
+        if re.match(r'^[wW]/"[0-9a-f]{10,}-gzip"$', etag):
+            return "Apache"
+
+    if "x-aspnet-version" in headers_lower or "x-aspnetmvc-version" in headers_lower:
+        return "IIS"
+    if "x-powered-by" in headers_lower:
+        xpb = headers_lower["x-powered-by"]
+        if "asp.net" in xpb:
+            return "IIS"
+        if "express" in xpb or "next.js" in xpb:
+            return "Node.js"
+        if "php" in xpb:
+            return "Nginx"
+        if "servlet" in xpb or "jsp" in xpb:
+            return "Tomcat"
+
+    if "x-vercel-id" in headers_lower:
+        return "Vercel"
+    if "x-netlify-request-id" in headers_lower:
+        return "Netlify"
+    if "fly-request-id" in headers_lower:
+        return "Fly.io"
+    if "cf-ray" in headers_lower:
+        return "Cloudflare"
+
+    if "x-cache" in headers_lower:
+        xc = headers_lower["x-cache"]
+        if "fastly" in xc:
+            return "Fastly"
+        if "cloudfront" in xc:
+            return "CloudFront"
+        if "varnish" in xc:
+            return "Varnish"
+
+    return ""
+
+
+def _infer_os(server_val, headers_lower):
+    """Infer OS from inferred/detected server name."""
+    s = server_val.lower()
+    if any(w in s for w in ("iis", "asp.net", "kestrel")):
+        return "Windows"
+    if any(w in s for w in ("nginx", "apache", "litespeed", "openresty",
+                            "tengine", "gunicorn", "uvicorn", "caddy")):
+        return "Linux"
+    if "tomcat" in s or "jetty" in s or "wildfly" in s:
+        return "Linux"
+    xpb = headers_lower.get("x-powered-by", "")
+    if "asp.net" in xpb:
+        return "Windows"
+    return "Unknown"
