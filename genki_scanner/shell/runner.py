@@ -412,7 +412,7 @@ class Soft404Detector:
                     headers=self._headers,
                 )
                 if resp.status_code == 200:
-                    body = resp.text
+                    body = resp.content.decode('utf-8', errors='replace')
                     self._fingerprints.append({
                         'length': len(body),
                         'hash': hashlib.sha256(self._normalize_body(body).encode()).hexdigest(),
@@ -785,7 +785,8 @@ class ShellOrchestrator:
                 if resp.status_code in (200, 301, 302, 403):
                     status = resp.status_code
                     size = len(resp.content)
-                    if self.soft404 and status == 200 and self.soft404.is_soft_404(status, resp.text, url):
+                    body_text = resp.content.decode('utf-8', errors='replace')
+                    if self.soft404 and status == 200 and self.soft404.is_soft_404(status, body_text, url):
                         if self.config.get("verbose"):
                             print(f"    {C.dim(f'[SOFT404] {path} (custom 404 page)')}")
                         continue
@@ -797,7 +798,7 @@ class ShellOrchestrator:
                             "content_type": resp.headers.get("Content-Type", ""),
                         }
 
-                        sensitive = _check_sensitive(path, resp.text, status)
+                        sensitive = _check_sensitive(path, body_text, status)
                         if sensitive:
                             entry["sensitive"] = True
                             entry["finding_type"] = sensitive
@@ -956,7 +957,7 @@ class ShellOrchestrator:
             if not body:
                 resp = req_lib.get(target_url, timeout=10, verify=False,
                                   headers=headers, allow_redirects=True)
-                body = resp.text
+                body = resp.content.decode('utf-8', errors='replace')
                 cookie_header = resp.headers.get("Set-Cookie", "")
             else:
                 cookie_header = server_info.get("response_headers", {}).get("Set-Cookie", "")
@@ -983,8 +984,9 @@ class ShellOrchestrator:
             for js_url in js_urls[:15]:
                 try:
                     js_resp = req_lib.get(js_url, timeout=10, verify=False, headers=headers)
-                    if js_resp.status_code == 200 and len(js_resp.text) > 50:
-                        js_api_eps = self._extract_api_from_js(js_resp.text, target_url)
+                    js_body = js_resp.content.decode('utf-8', errors='replace')
+                    if js_resp.status_code == 200 and len(js_body) > 50:
+                        js_api_eps = self._extract_api_from_js(js_body, target_url)
                         all_api_eps.update(js_api_eps)
                     time.sleep(delay * 0.3)
                 except Exception:
@@ -1296,12 +1298,17 @@ class ShellOrchestrator:
             print(f"  {C.warn('[SMUGGLER]')} Error: {e}")
 
     def _run_iast(self, target_url, server_info):
-        print(f"\n  {C.BMAG}[PHASE 1.1]{C.RST} IAST Taint Tracking + DOM Invader")
+        print(f"\n  {C.BMAG}[PHASE 1.1]{C.RST} IAST Taint Tracking + DOM Invader + OOB Callbacks")
         try:
-            results = run_iast_scan(target_url, verbose=self.config.get("verbose", False))
+            results = run_iast_scan(
+                target_url,
+                verbose=self.config.get("verbose", False),
+                oob_domain=self.oob_domain,
+            )
 
             iast_findings = results.get("findings", [])
             reflections = results.get("reflections", [])
+            oob_data = results.get("oob", {})
 
             if reflections:
                 print(f"  {C.ok('[IAST]')} {C.bold(str(len(reflections)))} taint reflections detected")
@@ -1311,10 +1318,23 @@ class ShellOrchestrator:
                     ctx = r.get("context", "?")
                     print(f"    {C.YLW}{source}{C.RST} -> {C.RED}{sink}{C.RST} ({ctx})")
 
+            oob_findings = oob_data.get("oob_findings", [])
+            if oob_findings:
+                print(f"  {C.BRED}[OOB]{C.RST} {C.bold(str(len(oob_findings)))} blind callback detections via {self.oob_domain}")
+                for of in oob_findings[:5]:
+                    print(f"    {C.RED}OOB{C.RST} {of.get('sink', '?')} -> {of.get('evidence', '')[:80]}")
+
+            oob_planted = oob_data.get("oob_canaries_planted", 0)
+            if oob_planted:
+                print(f"  {C.info('[OOB]')} {oob_planted} OOB canaries planted (check {self.oob_domain} dashboard)")
+
             for f in iast_findings:
                 sev = f.get("severity", "Medium")
+                name = f.get("title", "DOM Taint Flow")
+                if f.get("oob"):
+                    name = f"OOB Callback: {f.get('sink', 'blind')}"
                 self._add_finding({
-                    "name": f.get("title", "DOM Taint Flow"),
+                    "name": name,
                     "severity": sev,
                     "type": f.get("type", "Client-Side"),
                     "affects": f.get("url", target_url),

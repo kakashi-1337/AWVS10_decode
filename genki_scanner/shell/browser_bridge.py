@@ -108,7 +108,8 @@ def _mark_reflection_inputs(tree, engine):
                 continue
             try:
                 resp = req_lib.get(scheme.url, timeout=10, verify=False)
-                if inp.value in resp.text:
+                body = resp.content.decode('utf-8', errors='replace')
+                if inp.value in body:
                     inp.flags |= Scheme.INPUT_FLAG_REFLECTION_TESTS
             except Exception:
                 pass
