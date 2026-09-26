@@ -49,6 +49,12 @@ try:
 except ImportError:
     HAS_IAST = False
 
+try:
+    from .js_recon import JSRecon, run_js_recon
+    HAS_JS_RECON = True
+except ImportError:
+    HAS_JS_RECON = False
+
 
 PHASE_ORDER = [
     ("PerServer", "server"),
@@ -1205,6 +1211,10 @@ class ShellOrchestrator:
         if self.config.get("browser") and self.config.get("iast", True) and HAS_IAST:
             self._run_iast(target_url, server_info)
 
+        # Phase 1.2: JS Recon - harvest, deobfuscate, analyze (offline after download)
+        if HAS_JS_RECON and (not phases or "jsrecon" in (phases or [])):
+            self._run_js_recon(target_url, server_info)
+
         # Phase 1.5: Directory Enumeration
         if not phases or "dirs" in (phases or []):
             dir_results = self._dir_enum(target_url, server_info)
@@ -1322,6 +1332,92 @@ class ShellOrchestrator:
             print(f"  {C.warn('[IAST]')} Playwright not available (pip install playwright)")
         except Exception as e:
             print(f"  {C.warn('[IAST]')} Error: {e}")
+
+    def _run_js_recon(self, target_url, server_info):
+        print(f"\n  {C.BMAG}[PHASE 1.2]{C.RST} JS Recon {C.DIM}(harvest -> deobfuscate -> analyze){C.RST}")
+        try:
+            site_tree = self.site_trees.get(target_url)
+            html = server_info.get("_body", "")
+
+            recon = JSRecon(target_url, config=self.config, verbose=self.config.get("verbose", False))
+
+            # Harvest from page source + crawl results
+            if html:
+                recon.harvest_from_html(html)
+            if site_tree:
+                recon.harvest_from_site_tree(site_tree)
+
+            js_count = len(recon.js_urls)
+            if not js_count:
+                print(f"  {C.dim('[JS RECON] No JavaScript files discovered')}")
+                return
+
+            print(f"  [JS RECON] Discovered {C.bold(str(js_count))} JS files")
+
+            # Download all
+            downloaded = recon.download_all()
+            print(f"  [JS RECON] Downloaded {C.bold(str(downloaded))}/{js_count}")
+
+            # Deobfuscate offline
+            deob_count = recon.deobfuscate_all()
+            actual_deob = sum(
+                1 for u in recon.deobfuscated
+                if recon.deobfuscated[u] != recon.sources.get(u, "")
+            )
+            if actual_deob:
+                print(f"  {C.ok('[JSHADOW]')} Deobfuscated {C.bold(str(actual_deob))} files")
+
+            # Analyze for endpoints/secrets
+            recon.analyze_all()
+            summary = recon.get_summary()
+
+            endpoints = summary.get("api_endpoints", [])
+            secrets = summary.get("secrets", [])
+
+            if endpoints:
+                print(f"  {C.ok('[JS RECON]')} {C.bold(str(len(endpoints)))} API endpoints extracted")
+                for ep in endpoints[:8]:
+                    print(f"    {C.CYN}{ep}{C.RST}")
+                if len(endpoints) > 8:
+                    print(f"    {C.dim(f'... and {len(endpoints) - 8} more')}")
+
+                # Feed discovered endpoints back into site tree
+                if site_tree:
+                    for ep_url in endpoints:
+                        site_tree.add_url(ep_url)
+                    server_info["js_api_endpoints"] = endpoints
+
+            if secrets:
+                print(f"  {C.BRED}[JS RECON]{C.RST} {C.bold(str(len(secrets)))} potential secrets/keys found!")
+                for s in secrets[:5]:
+                    key = s.get("key", "")[:60]
+                    src = s.get("source_file", "").split("/")[-1]
+                    print(f"    {C.RED}{key}{C.RST} in {C.dim(src)}")
+                for s in secrets:
+                    self._add_finding({
+                        "name": "Hardcoded Secret in JavaScript",
+                        "severity": "High",
+                        "type": "Information Disclosure",
+                        "affects": s.get("source_file", target_url),
+                        "description": f"Potential secret found: {s.get('key', '')[:80]}",
+                        "evidence": s.get("value", "")[:100],
+                        "phase": "JS Recon",
+                    })
+
+            routes = summary.get("routes", [])
+            if routes:
+                print(f"  [JS RECON] {C.bold(str(len(routes)))} client-side routes mapped")
+
+            crypto = summary.get("crypto_usage", [])
+            if crypto:
+                print(f"  [JS RECON] {C.bold(str(len(crypto)))} crypto API calls detected")
+                for c in crypto[:3]:
+                    print(f"    {C.YLW}{c.get('lib', '')}{C.RST}")
+
+            server_info["js_recon"] = summary
+
+        except Exception as e:
+            print(f"  {C.warn('[JS RECON]')} Error: {e}")
 
     def _browser_crawl(self, target_url):
         try:

@@ -926,38 +926,91 @@ if (require.main === module) {
   const input = argv.find(a => !a.startsWith('-'));
   const oIdx = argv.indexOf('-o'); const output = oIdx !== -1 ? argv[oIdx + 1] : null;
   const verbose = argv.includes('-v') || argv.includes('--verbose');
+  const stdinMode = argv.includes('--stdin') || !input;
   const aiKeyIdx = argv.indexOf('--ai-key'); const aiKey = aiKeyIdx !== -1 ? argv[aiKeyIdx + 1] : process.env.JSHADOW_AI_KEY;
   const aiProvIdx = argv.indexOf('--ai-provider'); const aiProvider = aiProvIdx !== -1 ? argv[aiProvIdx + 1] : 'gemini';
   const ollamaIdx = argv.indexOf('--ollama'); const ollamaUrl = ollamaIdx !== -1 ? (argv[ollamaIdx + 1] || 'http://localhost:11434') : null;
-  if (!input) { console.error('Usage: node index.js <file.js> [-o out.js] [-v]'); process.exit(1); }
-  const code = fs.readFileSync(input, 'utf8');
-  const spin = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
-  let si = 0, spinner = null, curMsg = 'studying the encoded input…';
-  const startSpin = () => { if (!process.stderr.isTTY) return; spinner = setInterval(() => process.stderr.write(`\r${spin[si++ % spin.length]} ${curMsg}       `), 80); };
-  const stopSpin = () => { if (spinner) { clearInterval(spinner); spinner = null; if (process.stderr.isTTY) process.stderr.write('\r' + ' '.repeat(70) + '\r'); } };
 
-  const onProgress = (ev) => {
-    if (ev.phase === 'analyzing') { curMsg = ev.message; if (!spinner) startSpin(); if (!process.stderr.isTTY) process.stderr.write('… ' + ev.message + '\n'); }
-    else if (ev.phase === 'ready') { stopSpin(); process.stderr.write(`${ev.learned ? '🧠' : '🔎'} ${ev.message}\n`); if (ev.plan) process.stderr.write(`   family=${ev.plan.family} route=${ev.plan.route}${ev.plan.antiDebug.length ? ' anti-debug=' + ev.plan.antiDebug.join(',') : ''}\n`); }
-    else if (ev.phase === 'decoding') { process.stderr.write(`   ▸ ${ev.step}${ev.decoded ? ' (' + ev.decoded + ' strings)' : ''}\n`); }
+  // stdin JSON mode: read {"source": "...", "filename": "..."} from stdin
+  const readStdin = () => new Promise((resolve) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => data += chunk);
+    process.stdin.on('end', () => resolve(data));
+    setTimeout(() => resolve(data), 5000);
+  });
+
+  const run = async () => {
+    let code, filename;
+    if (stdinMode && !input) {
+      const raw = await readStdin();
+      try {
+        const parsed = JSON.parse(raw);
+        code = parsed.source || parsed.code || raw;
+        filename = parsed.filename || 'stdin.js';
+      } catch (e) {
+        code = raw;
+        filename = 'stdin.js';
+      }
+    } else if (input) {
+      code = fs.readFileSync(input, 'utf8');
+      filename = input;
+    } else {
+      console.error('Usage: node index.js <file.js> [-o out.js] [-v] [--stdin]');
+      process.exit(1);
+    }
+    return { code, filename };
   };
 
-  deobfuscate(code, { filename: input, verbose: false, onProgress, aiKey, aiProvider, ollamaUrl }).then(r => {
-    stopSpin();
-    process.stderr.write(`\n── J-Shadow Universal ──\n`);
-    process.stderr.write(`  family : ${r.profile.familyLabel}${r.profile.learnedHit ? ' (learned)' : ''}\n`);
-    process.stderr.write(`  plan   : ${r.plan.strategy}${r.plan.antiDebug.length ? ' | anti-debug: ' + r.plan.antiDebug.join(',') : ''}\n`);
-    if (r.plan.requires.length) process.stderr.write(`  requires: ${r.plan.requires.join(', ')}\n`);
-    process.stderr.write(`  tiers  : ${r.tiers.join(' → ')}\n`);
-    process.stderr.write(`  decoded: ${r.decoded} strings | size ${r.guardrails.sizeRatio}x\n`);
-    for (const w of r.guardrails.warnings) process.stderr.write(`  ⚠️ ${w}\n`);
-    if (r.partial) {
-      process.stderr.write(`  🔦 partial: ${r.partial.strings.length} strings · ${r.partial.urls.length} urls · ${r.partial.keys.length} key-like\n`);
-      if (r.partial.urls.length) process.stderr.write(`     urls: ${r.partial.urls.slice(0, 5).join(', ')}${r.partial.urls.length > 5 ? ' …' : ''}\n`);
-      if (r.partial.keys.length) process.stderr.write(`     keys: ${r.partial.keys.slice(0, 3).join(' | ')}\n`);
-    }
-    if (r.aiHint) process.stderr.write(`  ℹ️ ${r.aiHint}\n`);
-    if (output) { fs.writeFileSync(output, r.code); process.stderr.write(`  ✅ wrote ${output}\n`); }
-    else process.stdout.write(r.code);
-  }).catch(e => { stopSpin(); process.stderr.write('❌ ' + e.stack + '\n'); process.exit(1); });
+  run().then(({ code, filename }) => {
+    const spin = ['|','/','-','\\'];
+    let si = 0, spinner = null, curMsg = 'studying the encoded input...';
+    const startSpin = () => { if (!process.stderr.isTTY) return; spinner = setInterval(() => process.stderr.write(`\r${spin[si++ % spin.length]} ${curMsg}       `), 80); };
+    const stopSpin = () => { if (spinner) { clearInterval(spinner); spinner = null; if (process.stderr.isTTY) process.stderr.write('\r' + ' '.repeat(70) + '\r'); } };
+
+    const onProgress = (ev) => {
+      if (ev.phase === 'analyzing') { curMsg = ev.message; if (!spinner) startSpin(); if (!process.stderr.isTTY) process.stderr.write('... ' + ev.message + '\n'); }
+      else if (ev.phase === 'ready') { stopSpin(); process.stderr.write(`${ev.learned ? '[L]' : '[R]'} ${ev.message}\n`); if (ev.plan) process.stderr.write(`   family=${ev.plan.family} route=${ev.plan.route}${ev.plan.antiDebug.length ? ' anti-debug=' + ev.plan.antiDebug.join(',') : ''}\n`); }
+      else if (ev.phase === 'decoding') { process.stderr.write(`   > ${ev.step}${ev.decoded ? ' (' + ev.decoded + ' strings)' : ''}\n`); }
+    };
+
+    return deobfuscate(code, { filename, verbose: false, onProgress, aiKey, aiProvider, ollamaUrl }).then(r => {
+      stopSpin();
+      // JSON output mode for subprocess integration
+      if (stdinMode && !output) {
+        const out = {
+          code: r.code,
+          deobfuscated: r.code !== code,
+          family: r.profile.familyLabel,
+          route: r.plan.strategy,
+          tiers: r.tiers,
+          decoded: r.decoded,
+          sizeRatio: r.guardrails.sizeRatio,
+          warnings: r.guardrails.warnings,
+        };
+        if (r.partial) {
+          out.strings = r.partial.strings.length;
+          out.urls = r.partial.urls;
+          out.keys = r.partial.keys;
+        }
+        process.stdout.write(JSON.stringify(out));
+      } else {
+        process.stderr.write(`\n-- J-Shadow Universal --\n`);
+        process.stderr.write(`  family : ${r.profile.familyLabel}${r.profile.learnedHit ? ' (learned)' : ''}\n`);
+        process.stderr.write(`  plan   : ${r.plan.strategy}${r.plan.antiDebug.length ? ' | anti-debug: ' + r.plan.antiDebug.join(',') : ''}\n`);
+        if (r.plan.requires.length) process.stderr.write(`  requires: ${r.plan.requires.join(', ')}\n`);
+        process.stderr.write(`  tiers  : ${r.tiers.join(' > ')}\n`);
+        process.stderr.write(`  decoded: ${r.decoded} strings | size ${r.guardrails.sizeRatio}x\n`);
+        for (const w of r.guardrails.warnings) process.stderr.write(`  [!] ${w}\n`);
+        if (r.partial) {
+          process.stderr.write(`  partial: ${r.partial.strings.length} strings / ${r.partial.urls.length} urls / ${r.partial.keys.length} key-like\n`);
+          if (r.partial.urls.length) process.stderr.write(`     urls: ${r.partial.urls.slice(0, 5).join(', ')}${r.partial.urls.length > 5 ? ' ...' : ''}\n`);
+          if (r.partial.keys.length) process.stderr.write(`     keys: ${r.partial.keys.slice(0, 3).join(' | ')}\n`);
+        }
+        if (r.aiHint) process.stderr.write(`  [i] ${r.aiHint}\n`);
+        if (output) { fs.writeFileSync(output, r.code); process.stderr.write(`  [ok] wrote ${output}\n`); }
+        else process.stdout.write(r.code);
+      }
+    });
+  }).catch(e => { process.stderr.write('[ERR] ' + (e.stack || e.message || e) + '\n'); process.exit(1); });
 }
