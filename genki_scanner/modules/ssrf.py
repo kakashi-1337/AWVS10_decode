@@ -59,6 +59,7 @@ class SSRFModule(BaseModule):
         baseline = self.http.get(url)
         if not baseline:
             return
+        baseline_body = baseline.content.decode('utf-8', errors='replace')
 
         for payload in SSRF_OOB_PAYLOADS:
             test_url = self._build_url(parsed, query_params, param_name, payload)
@@ -70,14 +71,15 @@ class SSRFModule(BaseModule):
             if not resp:
                 continue
 
-            if resp.status_code == 200 and resp.text != baseline.text:
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if resp.status_code == 200 and resp_body != baseline_body:
                 internal_indicators = [
                     "Apache", "nginx", "404 Not Found", "IIS",
                     "It works!", "Welcome to", "Index of /",
                     "Connection refused", "No route to host",
                 ]
                 for ind in internal_indicators:
-                    if ind in resp.text and ind not in baseline.text:
+                    if ind in resp_body and ind not in baseline_body:
                         self.reporter.add(Finding(
                             vuln_type="SSRF (Internal Service)",
                             severity="HIGH",
@@ -89,10 +91,10 @@ class SSRFModule(BaseModule):
                         ))
                         return
 
-        self._test_cloud_metadata(url, parsed, query_params, param_name, baseline)
+        self._test_cloud_metadata(url, parsed, query_params, param_name, baseline_body)
         self._test_timing_ssrf(url, parsed, query_params, param_name)
 
-    def _test_cloud_metadata(self, url, parsed, query_params, param_name, baseline):
+    def _test_cloud_metadata(self, url, parsed, query_params, param_name, baseline_body):
         for provider, endpoints in CLOUD_METADATA.items():
             for meta_url, indicator in endpoints:
                 test_url = self._build_url(parsed, query_params, param_name, meta_url)
@@ -105,13 +107,14 @@ class SSRFModule(BaseModule):
                 resp = self.http.get(test_url, headers=extra_headers if extra_headers else None)
                 if not resp or resp.status_code != 200:
                     continue
-                if resp.text == baseline.text:
+                resp_body = resp.content.decode('utf-8', errors='replace')
+                if resp_body == baseline_body:
                     continue
 
                 provider_name = provider.split("_")[0]
                 if provider_name in CLOUD_INDICATORS:
                     for ci in CLOUD_INDICATORS[provider_name]:
-                        if ci in resp.text:
+                        if ci in resp_body:
                             self.reporter.add(Finding(
                                 vuln_type="SSRF (Cloud Metadata)",
                                 severity="CRITICAL",
@@ -123,7 +126,7 @@ class SSRFModule(BaseModule):
                             ))
                             return
 
-                if indicator and indicator in resp.text:
+                if indicator and indicator in resp_body:
                     self.reporter.add(Finding(
                         vuln_type="SSRF (Cloud Metadata)",
                         severity="CRITICAL",

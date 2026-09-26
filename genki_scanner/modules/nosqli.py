@@ -56,6 +56,7 @@ class NoSQLiModule(BaseModule):
         baseline = self.http.get(url)
         if not baseline:
             return
+        baseline_body = baseline.content.decode('utf-8', errors='replace')
 
         for op_suffix, op_value in self.OPERATOR_PAYLOADS_URL:
             modified = dict(query_params)
@@ -68,16 +69,17 @@ class NoSQLiModule(BaseModule):
             resp = self.http.get(test_url)
             if not resp:
                 continue
+            resp_body = resp.content.decode('utf-8', errors='replace')
 
-            if resp.status_code == 200 and resp.text != baseline.text:
-                if len(resp.text) > len(baseline.text) * 1.5 or resp.text.count("{") > baseline.text.count("{") + 3:
+            if resp.status_code == 200 and resp_body != baseline_body:
+                if len(resp_body) > len(baseline_body) * 1.5 or resp_body.count("{") > baseline_body.count("{") + 3:
                     self.reporter.add(Finding(
                         vuln_type="NoSQL Injection (Operator)",
                         severity="HIGH",
                         url=url,
                         parameter=param_name,
                         payload=f"{param_name}{op_suffix}={op_value}",
-                        evidence=f"Response changed: {len(baseline.text)} -> {len(resp.text)} bytes",
+                        evidence=f"Response changed: {len(baseline_body)} -> {len(resp_body)} bytes",
                         details="MongoDB operator injection. Data extraction possible.",
                     ))
                     return
@@ -86,6 +88,7 @@ class NoSQLiModule(BaseModule):
         baseline = self.http.get(url)
         if not baseline:
             return
+        baseline_body = baseline.content.decode('utf-8', errors='replace')
 
         content_type = baseline.headers.get("Content-Type", "")
         if "json" not in content_type and "application/x-www-form-urlencoded" not in content_type:
@@ -100,16 +103,17 @@ class NoSQLiModule(BaseModule):
             resp = self.http.request("POST", url, json=body)
             if not resp:
                 continue
+            resp_body = resp.content.decode('utf-8', errors='replace')
 
-            if resp.status_code == 200 and resp.text != baseline.text:
-                if len(resp.text) > len(baseline.text) * 1.3:
+            if resp.status_code == 200 and resp_body != baseline_body:
+                if len(resp_body) > len(baseline_body) * 1.3:
                     self.reporter.add(Finding(
                         vuln_type="NoSQL Injection (JSON Operator)",
                         severity="HIGH",
                         url=url,
                         parameter=param_name,
                         payload=json.dumps(json_payload),
-                        evidence=f"Response changed with JSON operator: {len(resp.text)} bytes",
+                        evidence=f"Response changed with JSON operator: {len(resp_body)} bytes",
                         details="MongoDB JSON operator injection via POST body.",
                     ))
                     return
@@ -133,9 +137,10 @@ class NoSQLiModule(BaseModule):
                 continue
 
             if resp.status_code in (200, 302):
+                resp_body = resp.content.decode('utf-8', errors='replace')
                 auth_indicators = ["dashboard", "welcome", "profile", "admin", "logout", "session", "token"]
                 for ind in auth_indicators:
-                    if ind.lower() in resp.text.lower():
+                    if ind.lower() in resp_body.lower():
                         self.reporter.add(Finding(
                             vuln_type="NoSQL Auth Bypass",
                             severity="CRITICAL",

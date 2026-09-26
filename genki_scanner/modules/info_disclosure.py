@@ -107,7 +107,7 @@ class InfoDisclosureModule(BaseModule):
                     details=desc,
                 ))
 
-        body = resp.text
+        body = resp.content.decode('utf-8', errors='replace')
         error_patterns = [
             (r"Traceback \(most recent call last\)", "Python stack trace"),
             (r"at\s+[\w$.]+\([\w]+\.java:\d+\)", "Java stack trace"),
@@ -133,12 +133,13 @@ class InfoDisclosureModule(BaseModule):
             if not resp or resp.status_code != 200:
                 continue
 
-            if len(resp.text) < 5:
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if len(resp_body) < 5:
                 continue
 
             indicators = indicator.split("|")
             for ind in indicators:
-                if ind in resp.text:
+                if ind in resp_body:
                     severity = "LOW"
                     if any(s in path for s in [".env", ".git", "backup", "config", "phpinfo", "actuator", "debug"]):
                         severity = "HIGH" if ".env" in path or ".git" in path else "MEDIUM"

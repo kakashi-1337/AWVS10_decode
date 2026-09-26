@@ -105,8 +105,9 @@ class SQLiModule(BaseModule):
         baseline = self.http.get(url)
         if not baseline:
             return
+        baseline_body = baseline.content.decode('utf-8', errors='replace')
 
-        baseline_has_error, _ = detect_sql_error(baseline.text)
+        baseline_has_error, _ = detect_sql_error(baseline_body)
 
         for payload in self.ERROR_PAYLOADS:
             test_value = original_value + payload
@@ -114,10 +115,11 @@ class SQLiModule(BaseModule):
             resp = self.http.get(test_url)
             if not resp:
                 continue
+            resp_body = resp.content.decode('utf-8', errors='replace')
 
-            found, pattern = detect_sql_error(resp.text)
+            found, pattern = detect_sql_error(resp_body)
             if found and not baseline_has_error:
-                db = fingerprint_db(resp.text)
+                db = fingerprint_db(resp_body)
                 self.reporter.add(Finding(
                     vuln_type="SQL Injection (Error-based)",
                     severity="HIGH",
@@ -133,7 +135,8 @@ class SQLiModule(BaseModule):
         baseline = self.http.get(url)
         if not baseline:
             return
-        baseline_has_error, _ = detect_sql_error(baseline.text)
+        baseline_body = baseline.content.decode('utf-8', errors='replace')
+        baseline_has_error, _ = detect_sql_error(baseline_body)
 
         for category, payloads in self.WAF_BYPASS_SETS.items():
             for payload in payloads:
@@ -142,9 +145,10 @@ class SQLiModule(BaseModule):
                 resp = self.http.get(test_url)
                 if not resp:
                     continue
-                found, pattern = detect_sql_error(resp.text)
+                resp_body = resp.content.decode('utf-8', errors='replace')
+                found, pattern = detect_sql_error(resp_body)
                 if found and not baseline_has_error:
-                    db = fingerprint_db(resp.text)
+                    db = fingerprint_db(resp_body)
                     self.reporter.add(Finding(
                         vuln_type="SQL Injection (WAF Bypass)",
                         severity="HIGH",
@@ -172,8 +176,10 @@ class SQLiModule(BaseModule):
         if not resp1 or not resp2:
             return
 
-        body1 = self._get_filtered_body(resp1.text, original_value)
-        body2 = self._get_filtered_body(resp2.text, original_value)
+        resp1_body = resp1.content.decode('utf-8', errors='replace')
+        resp2_body = resp2.content.decode('utf-8', errors='replace')
+        body1 = self._get_filtered_body(resp1_body, original_value)
+        body2 = self._get_filtered_body(resp2_body, original_value)
         if body1 != body2:
             self.log(f"  Response not stable for {param_name}, skipping blind test")
             return
@@ -183,7 +189,8 @@ class SQLiModule(BaseModule):
         rand_resp = self.http.get(rand_url)
         if not rand_resp:
             return
-        rand_body = self._get_filtered_body(rand_resp.text, rand_val)
+        rand_resp_body = rand_resp.content.decode('utf-8', errors='replace')
+        rand_body = self._get_filtered_body(rand_resp_body, rand_val)
 
         if body1 == rand_body:
             return
@@ -201,8 +208,10 @@ class SQLiModule(BaseModule):
             if not true_resp or not false_resp:
                 continue
 
-            true_body = self._get_filtered_body(true_resp.text, true_val)
-            false_body = self._get_filtered_body(false_resp.text, false_val)
+            true_resp_body = true_resp.content.decode('utf-8', errors='replace')
+            false_resp_body = false_resp.content.decode('utf-8', errors='replace')
+            true_body = self._get_filtered_body(true_resp_body, true_val)
+            false_body = self._get_filtered_body(false_resp_body, false_val)
 
             if true_body == body1 and false_body != body1:
                 confirmed += 1
@@ -224,8 +233,10 @@ class SQLiModule(BaseModule):
                 false_resp = self.http.get(false_url)
                 if not true_resp or not false_resp:
                     continue
-                true_body = self._get_filtered_body(true_resp.text, true_val)
-                false_body = self._get_filtered_body(false_resp.text, false_val)
+                true_resp_body = true_resp.content.decode('utf-8', errors='replace')
+                false_resp_body = false_resp.content.decode('utf-8', errors='replace')
+                true_body = self._get_filtered_body(true_resp_body, true_val)
+                false_body = self._get_filtered_body(false_resp_body, false_val)
                 if true_body == body1 and false_body != body1:
                     reconfirmed += 1
 

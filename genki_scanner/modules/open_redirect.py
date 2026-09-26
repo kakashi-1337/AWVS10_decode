@@ -88,18 +88,19 @@ class OpenRedirectModule(BaseModule):
                     return
 
             if resp.status_code == 200:
-                body_lower = resp.text.lower()
+                resp_body = resp.content.decode('utf-8', errors='replace')
+                body_lower = resp_body.lower()
                 for tag in ["meta", "script"]:
                     if self.MARKER in body_lower:
                         import re
                         meta_match = re.search(
                             rf'<meta[^>]*url\s*=\s*["\']?[^"\']*{re.escape(self.MARKER)}',
-                            resp.text,
+                            resp_body,
                             re.IGNORECASE,
                         )
                         js_match = re.search(
                             rf'(window\.location|location\.href|location\.replace)\s*[=(]\s*["\'][^"\']*{re.escape(self.MARKER)}',
-                            resp.text,
+                            resp_body,
                             re.IGNORECASE,
                         )
                         if meta_match or js_match:

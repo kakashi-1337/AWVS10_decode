@@ -46,8 +46,9 @@ class LFIModule(BaseModule):
             baseline = self.http.get(url)
             if not baseline:
                 continue
+            baseline_body = baseline.content.decode('utf-8', errors='replace')
 
-            baseline_has_error, _ = detect_include_error(baseline.text)
+            baseline_has_error, _ = detect_include_error(baseline_body)
 
             for payload_list, os_type in [
                 (UNIX_TRAVERSAL, "unix"),
@@ -59,8 +60,9 @@ class LFIModule(BaseModule):
                     resp = self.http.get(test_url)
                     if not resp:
                         continue
+                    resp_body = resp.content.decode('utf-8', errors='replace')
 
-                    found, evidence = detect_traversal_success(resp.text)
+                    found, evidence = detect_traversal_success(resp_body)
                     if found:
                         self.reporter.add(Finding(
                             vuln_type="Directory Traversal / LFI",
@@ -78,9 +80,10 @@ class LFIModule(BaseModule):
                 resp = self.http.get(test_url)
                 if not resp:
                     continue
+                resp_body = resp.content.decode('utf-8', errors='replace')
 
                 if "php://filter" in payload and "convert.base64" in payload:
-                    b64_match = re.search(r"[A-Za-z0-9+/]{40,}={0,2}", resp.text)
+                    b64_match = re.search(r"[A-Za-z0-9+/]{40,}={0,2}", resp_body)
                     if b64_match:
                         try:
                             decoded = base64.b64decode(b64_match.group(0)).decode("utf-8", errors="ignore")
@@ -98,7 +101,7 @@ class LFIModule(BaseModule):
                         except Exception:
                             pass
 
-                found, evidence = detect_include_error(resp.text)
+                found, evidence = detect_include_error(resp_body)
                 if found and not baseline_has_error:
                     self.reporter.add(Finding(
                         vuln_type="Local File Inclusion (PHP include error)",
@@ -121,8 +124,9 @@ class LFIModule(BaseModule):
             resp = self.http.get(test_url)
             if not resp:
                 continue
-            if resp.status_code == 200 and len(resp.text) > 0:
-                if "<?php" in resp.text or "PD9waH" in resp.text:
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if resp.status_code == 200 and len(resp_body) > 0:
+                if "<?php" in resp_body or "PD9waH" in resp_body:
                     self.reporter.add(Finding(
                         vuln_type="LFI to RCE (PHP filter chain)",
                         severity="CRITICAL",
@@ -137,9 +141,9 @@ class LFIModule(BaseModule):
     def _test_sensitive_files(self, url, parsed):
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         baseline = self.http.get(url)
-        baseline_length = len(baseline.text) if baseline else 0
+        baseline_length = len(baseline.content.decode('utf-8', errors='replace')) if baseline else 0
         baseline_404 = self.http.get(f"{base_url}/genki_nonexistent_path_test")
-        baseline_404_text = baseline_404.text if baseline_404 else ""
+        baseline_404_body = baseline_404.content.decode('utf-8', errors='replace') if baseline_404 else ""
 
         for path in ALL_SENSITIVE_FILES:
             test_url = f"{base_url}{path}"
@@ -147,8 +151,9 @@ class LFIModule(BaseModule):
             if not resp or resp.status_code not in (200, 403):
                 continue
 
-            if resp.status_code == 200 and resp.text and resp.text != baseline_404_text:
-                found, evidence = detect_sensitive_file(resp.text, path)
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if resp.status_code == 200 and resp_body and resp_body != baseline_404_body:
+                found, evidence = detect_sensitive_file(resp_body, path)
                 if found:
                     self.reporter.add(Finding(
                         vuln_type="Sensitive File Exposure",

@@ -25,8 +25,9 @@ class HostHeaderModule(BaseModule):
         resp = self.http.get(url, headers={"Host": self.EVIL_HOST})
         if not resp:
             return
+        resp_body = resp.content.decode('utf-8', errors='replace')
 
-        if self._check_reflection(resp.text, self.EVIL_HOST):
+        if self._check_reflection(resp_body, self.EVIL_HOST):
             self.reporter.add(Finding(
                 vuln_type="Host Header Injection",
                 severity="MEDIUM",
@@ -50,7 +51,8 @@ class HostHeaderModule(BaseModule):
             if not resp:
                 continue
 
-            if self._check_reflection(resp.text, self.EVIL_HOST):
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if self._check_reflection(resp_body, self.EVIL_HOST):
                 self.reporter.add(Finding(
                     vuln_type="Host Header Injection via X-Forwarded-Host",
                     severity="MEDIUM",

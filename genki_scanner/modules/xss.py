@@ -163,10 +163,13 @@ class XSSModule(BaseModule):
         probe = f"gkprobe{rand_token()}"
         probe_url = self._build_url(parsed, query_params, param_name, probe)
         probe_resp = self.http.get(probe_url)
-        if not probe_resp or probe not in probe_resp.text:
+        if not probe_resp:
+            return
+        probe_body = probe_resp.content.decode('utf-8', errors='replace')
+        if probe not in probe_body:
             return
 
-        contexts = self._detect_context(probe_resp.text, probe)
+        contexts = self._detect_context(probe_body, probe)
         if not contexts:
             return
 
@@ -198,8 +201,9 @@ class XSSModule(BaseModule):
             resp = self.http.get(test_url)
             if not resp:
                 continue
+            resp_body = resp.content.decode('utf-8', errors='replace')
 
-            if self._verify_xss(resp.text, token_val):
+            if self._verify_xss(resp_body, token_val):
                 self.reporter.add(Finding(
                     vuln_type="Cross-Site Scripting (Reflected)",
                     severity="HIGH",
@@ -216,7 +220,7 @@ class XSSModule(BaseModule):
         if not resp:
             return
 
-        body = resp.text
+        body = resp.content.decode('utf-8', errors='replace')
         found_sources = [s for s in DOM_XSS_SOURCES if s in body]
         found_sinks = [s for s in DOM_XSS_SINKS if s in body]
 
@@ -255,8 +259,9 @@ class XSSModule(BaseModule):
                 resp = self.http.get(test_url)
                 if not resp:
                     continue
+                resp_body = resp.content.decode('utf-8', errors='replace')
 
-                if expected in resp.text and payload not in resp.text:
+                if expected in resp_body and payload not in resp_body:
                     self.reporter.add(Finding(
                         vuln_type="Server-Side Template Injection (SSTI)",
                         severity="CRITICAL",
@@ -286,7 +291,8 @@ class XSSModule(BaseModule):
                 resp = self.http.get(test_url)
                 if not resp:
                     continue
-                if "alert(" in resp.text and "<" in payload and payload[:10] in resp.text:
+                resp_body = resp.content.decode('utf-8', errors='replace')
+                if "alert(" in resp_body and "<" in payload and payload[:10] in resp_body:
                     self.reporter.add(Finding(
                         vuln_type="Cross-Site Scripting (Polyglot)",
                         severity="HIGH",

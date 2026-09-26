@@ -56,7 +56,8 @@ class CRLFModule(BaseModule):
                 ))
                 return
 
-            if marker in resp.text and "<script>" in payload:
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if marker in resp_body and "<script>" in payload:
                 self.reporter.add(Finding(
                     vuln_type="CRLF Injection to XSS (Path)",
                     severity="HIGH",
