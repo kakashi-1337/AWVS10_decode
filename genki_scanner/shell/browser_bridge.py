@@ -84,12 +84,51 @@ async def _async_crawl(target_urls, config, max_depth, max_pages):
             cookies = await engine.get_cookies()
             tree._browser_cookies = cookies
 
+            storage = await _extract_storage(engine, url)
+            tree._storage = storage
+            if storage.get("localStorage") or storage.get("sessionStorage"):
+                ls_count = len(storage.get("localStorage", {}))
+                ss_count = len(storage.get("sessionStorage", {}))
+                print(f"  [BROWSER] Storage: {ls_count} localStorage, {ss_count} sessionStorage keys")
+
             trees[url] = tree
 
     finally:
         await engine.stop()
 
     return trees
+
+
+async def _extract_storage(engine, url):
+    """Extract localStorage and sessionStorage keys/values from the page."""
+    storage = {"localStorage": {}, "sessionStorage": {}}
+    try:
+        page = await engine.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=15000)
+        storage["localStorage"] = await page.evaluate("""() => {
+            const data = {};
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    data[key] = localStorage.getItem(key);
+                }
+            } catch(e) {}
+            return data;
+        }""")
+        storage["sessionStorage"] = await page.evaluate("""() => {
+            const data = {};
+            try {
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    data[key] = sessionStorage.getItem(key);
+                }
+            } catch(e) {}
+            return data;
+        }""")
+        await page.close()
+    except Exception:
+        pass
+    return storage
 
 
 def _mark_reflection_inputs(tree, engine):

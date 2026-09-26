@@ -79,21 +79,74 @@ TECH_SIGNATURES = {
         "ASP.NET_SessionId": "ASP.NET",
         "ASPSESSIONID": "ASP Classic",
         "connect.sid": "Node.js",
+        "express:sess": "Express",
+        "koa.sess": "Koa",
+        "koa:sess": "Koa",
+        "fastify.session": "Fastify",
         "csrftoken": "Django",
+        "django_language": "Django",
         "laravel_session": "Laravel",
+        "XSRF-TOKEN": "Angular/Laravel",
         "_rails_session": "Rails",
         "rack.session": "Ruby/Rack",
+        "_gorilla_csrf": "Go",
+        "beaker.session.id": "Python",
+        "pylons_session": "Python/Pylons",
+        "session_id_flask": "Flask",
         "wp-settings": "WordPress",
+        "wordpress_logged_in": "WordPress",
+        "wp_woocommerce_session": "WooCommerce",
         "Drupal.visitor": "Drupal",
+        "joomla_user_state": "Joomla",
+        "PrestaShop-": "PrestaShop",
+        "Magento": "Magento",
+        "frontend_cid": "Magento",
+        "Shopify.online_store": "Shopify",
+        "_shopify_s": "Shopify",
+        "ghost-admin-api-session": "Ghost",
+        "_ga": "Google Analytics",
+        "_gid": "Google Analytics",
+        "_gat": "Google Analytics",
+        "_ga_": "Google Analytics 4",
+        "_gcl_au": "Google Ads",
+        "_fbp": "Facebook Pixel",
+        "_fbc": "Facebook Pixel",
+        "intercom-session": "Intercom",
+        "hubspotutk": "HubSpot",
+        "__hs_opt_out": "HubSpot",
+        "_mkto_trk": "Marketo",
+        "_hjid": "Hotjar",
+        "_hjSessionUser": "Hotjar",
+        "mp_": "Mixpanel",
+        "ajs_anonymous_id": "Segment",
+        "amplitude_id": "Amplitude",
+        "_pk_id": "Matomo",
+        "_pk_ses": "Matomo",
+        "__stripe_mid": "Stripe",
+        "__stripe_sid": "Stripe",
+        "_dd_s": "Datadog RUM",
+        "dd_cookie_test": "Datadog RUM",
         "AWSALB": "AWS ALB",
         "AWSALBCORS": "AWS ALB",
+        "AWSELB": "AWS ELB",
         "__cfduid": "Cloudflare",
         "cf_clearance": "Cloudflare",
         "__cf_bm": "Cloudflare Bot Management",
+        "__cfruid": "Cloudflare",
+        "SERVERID": "HAProxy",
+        "ROUTEID": "HAProxy",
         "_gh_sess": "GitHub",
         "grafana_session": "Grafana",
         "jenkins.session": "Jenkins",
-        "XSRF-TOKEN": "Angular/Laravel",
+        "_gitlab_session": "GitLab",
+        "redmine_session": "Redmine",
+        "confluence.browse.space.cookie": "Confluence",
+        "BITBUCKET_TOKEN": "Bitbucket",
+        "atlassian.xsrf.token": "Atlassian",
+        "OptanonConsent": "OneTrust",
+        "CookieConsent": "Cookiebot",
+        "euconsent-v2": "IAB TCF",
+        "usprivacy": "IAB USPrivacy",
     },
     "body_patterns": {
         "WordPress": [
@@ -176,6 +229,46 @@ TECH_SIGNATURES = {
         "Unix": {
             "headers": ["freebsd", "openbsd", "solaris"],
         },
+    },
+    "storage_keys": {
+        "ally-supports-cache": "Angular",
+        "@@auth0spajs@@": "Auth0",
+        "amplify-signin-with-hostedUI": "AWS Amplify",
+        "CognitoIdentityServiceProvider": "AWS Cognito",
+        "firebase:authUser": "Firebase",
+        "firebase:host": "Firebase",
+        "firebaseLocalStorageDb": "Firebase",
+        "_grecaptcha": "reCAPTCHA",
+        "@@History/": "React Router",
+        "__next": "Next.js",
+        "nuxt-": "Nuxt",
+        "vuex": "Vue.js/Vuex",
+        "pinia": "Vue.js/Pinia",
+        "redux": "Redux",
+        "persist:root": "Redux Persist",
+        "sb-": "Supabase",
+        "supabase.auth": "Supabase",
+        "clerk-db-jwt": "Clerk",
+        "__clerk": "Clerk",
+        "intercom.intercom-state": "Intercom",
+        "_hjSession": "Hotjar",
+        "ajs_user_id": "Segment",
+        "amplitude_unsent": "Amplitude",
+        "mp_": "Mixpanel",
+        "_ga": "Google Analytics",
+        "optimizely": "Optimizely",
+        "abtasty": "AB Tasty",
+        "loglevel": "loglevel.js",
+        "debug": "debug.js",
+        "sentry": "Sentry",
+        "i18n": "i18n",
+        "i18next": "i18next",
+        "crisp-client": "Crisp",
+        "tawk-": "Tawk.to",
+        "__stripe_mid": "Stripe",
+        "drift-": "Drift",
+        "hubspot": "HubSpot",
+        "hs-": "HubSpot",
     },
 }
 
@@ -377,6 +470,41 @@ def _add_tech(result, tech):
         result["js_frameworks"].append(tech)
     if tech in cdn_list and tech not in result["cdn"]:
         result["cdn"].append(tech)
+
+
+def detect_from_storage(storage_data):
+    """Detect technologies from localStorage/sessionStorage keys.
+    Args: storage_data = {"localStorage": {key: val}, "sessionStorage": {key: val}}
+    Returns: list of detected tech names
+    """
+    detected = []
+    sigs = TECH_SIGNATURES.get("storage_keys", {})
+    all_keys = []
+    for store_type in ("localStorage", "sessionStorage"):
+        store = storage_data.get(store_type, {})
+        if isinstance(store, dict):
+            all_keys.extend(store.keys())
+
+    for key in all_keys:
+        key_lower = key.lower()
+        for sig, tech in sigs.items():
+            if sig.lower() in key_lower and tech not in detected:
+                detected.append(tech)
+    return detected
+
+
+def detect_from_cookies_list(cookies):
+    """Detect technologies from browser cookie objects.
+    Args: cookies = [{"name": "...", "value": "...", "domain": "..."}, ...]
+    Returns: list of detected tech names
+    """
+    detected = []
+    for cookie in cookies:
+        name = cookie.get("name", "").lower()
+        for sig, tech in TECH_SIGNATURES["cookies"].items():
+            if sig.lower() in name and tech not in detected:
+                detected.append(tech)
+    return detected
 
 
 def _infer_server_from_headers(headers_lower):

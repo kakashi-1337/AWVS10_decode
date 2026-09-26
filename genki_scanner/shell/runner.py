@@ -26,7 +26,7 @@ from urllib.parse import urlparse, urljoin, parse_qs
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from .tech_detect import detect_technologies, WAF_SIGNATURES
+from .tech_detect import detect_technologies, WAF_SIGNATURES, detect_from_storage, detect_from_cookies_list
 from .site_tree import SiteTree, Scheme, SiteFile
 from . import colors as C
 from .wappalyzer import detect as wap_detect, categorize as wap_categorize
@@ -1670,6 +1670,22 @@ class ShellOrchestrator:
                 tree = trees[target_url]
                 print(f"  {C.ok('[CRAWL]')} {C.bold(str(len(tree.all_files)))} pages, "
                       f"{C.bold(str(len(tree.all_schemes)))} schemes, {C.bold(str(len(tree.all_directories)))} dirs")
+
+                extra_tech = []
+                if hasattr(tree, '_storage') and tree._storage:
+                    storage_techs = detect_from_storage(tree._storage)
+                    extra_tech.extend(storage_techs)
+                if hasattr(tree, '_browser_cookies') and tree._browser_cookies:
+                    cookie_techs = detect_from_cookies_list(tree._browser_cookies)
+                    extra_tech.extend(cookie_techs)
+                if extra_tech:
+                    unique = list(dict.fromkeys(extra_tech))
+                    si = self._last_server_info
+                    for t in unique:
+                        if t not in si.get("technologies", []):
+                            si["technologies"].append(t)
+                    self._build_tech_set(si)
+                    print(f"  {C.info('[BROWSER]')} +{len(unique)} techs from cookies/storage: {C.CYN}{', '.join(unique)}{C.RST}")
         except ImportError:
             print(f"  {C.warn('[WARN]')} Browser module not available (pip install playwright)")
         except Exception as e:
