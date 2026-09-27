@@ -40,6 +40,16 @@ _BASELINE_TIMEOUT = 10
 _PROBE_TIMEOUT = 15
 _READ_SIZE = 4096
 _TIMING_THRESHOLD_MS = 3000
+_TIMING_BASELINE_MULTIPLIER = 3.0
+_TIMING_MIN_ABSOLUTE_MS = 5000
+_TIMEOUT_MARGIN = 0.80
+
+
+def _is_timeout(t_ms: float, timeout_s: float = _PROBE_TIMEOUT) -> bool:
+    """Return True if a timing measurement is a socket timeout rather than a
+    genuine server-induced delay. If t_ms >= 80% of the probe timeout, it's
+    almost certainly the socket hitting the deadline, not real desync latency."""
+    return t_ms >= timeout_s * 1000 * _TIMEOUT_MARGIN
 
 
 def _parse_target(url: str):
@@ -245,6 +255,7 @@ class HTTPSmuggler:
             confidence = "low"
             detail = ""
 
+            threshold = getattr(self, "_threshold", _TIMING_MIN_ABSOLUTE_MS)
             # Detection: followup got an unexpected status or reflects marker
             if marker in resp2_text:
                 confirmed = True
@@ -255,9 +266,9 @@ class HTTPSmuggler:
                     confirmed = True
                     confidence = "medium"
                     detail = f"Followup returned {status2} (expected 2xx/3xx)"
-            elif total > _TIMING_THRESHOLD_MS:
+            elif total > threshold and not _is_timeout(t1) and not _is_timeout(t2):
                 confidence = "medium"
-                detail = f"Timing anomaly: {total:.0f}ms (threshold {_TIMING_THRESHOLD_MS}ms)"
+                detail = f"Timing anomaly: {total:.0f}ms (threshold {threshold:.0f}ms)"
                 confirmed = True
 
             if confirmed:
@@ -335,6 +346,7 @@ class HTTPSmuggler:
             confidence = "low"
             detail = ""
 
+            threshold = getattr(self, "_threshold", _TIMING_MIN_ABSOLUTE_MS)
             if marker in resp2_text:
                 confirmed = True
                 confidence = "high"
@@ -343,10 +355,10 @@ class HTTPSmuggler:
                 confirmed = True
                 confidence = "medium"
                 detail = f"Followup returned {status2} instead of normal status"
-            elif total > _TIMING_THRESHOLD_MS:
+            elif total > threshold and not _is_timeout(t1) and not _is_timeout(t2):
                 confirmed = True
                 confidence = "medium"
-                detail = f"Timing anomaly: {total:.0f}ms"
+                detail = f"Timing anomaly: {total:.0f}ms (threshold {threshold:.0f}ms)"
 
             if confirmed:
                 return SmuggleResult(
@@ -418,6 +430,7 @@ class HTTPSmuggler:
             confidence = "low"
             detail = ""
 
+            threshold = getattr(self, "_threshold", _TIMING_MIN_ABSOLUTE_MS)
             if marker in resp2_text:
                 confirmed = True
                 confidence = "high"
@@ -426,10 +439,10 @@ class HTTPSmuggler:
                 confirmed = True
                 confidence = "medium"
                 detail = f"Followup got {status2} after TE.TE probe"
-            elif total > _TIMING_THRESHOLD_MS:
+            elif total > threshold and not _is_timeout(t1) and not _is_timeout(t2):
                 confirmed = True
                 confidence = "low"
-                detail = f"Timing anomaly: {total:.0f}ms (TE.TE)"
+                detail = f"Timing anomaly: {total:.0f}ms (threshold {threshold:.0f}ms, TE.TE)"
 
             if confirmed:
                 return SmuggleResult(
@@ -455,6 +468,14 @@ class HTTPSmuggler:
 
     # -- public API --------------------------------------------------------
 
+    def _effective_threshold(self, baseline_ms: float) -> float:
+        """Compute timing threshold relative to baseline. A probe must exceed
+        both the absolute minimum AND the baseline multiplier to be flagged."""
+        return max(
+            _TIMING_MIN_ABSOLUTE_MS,
+            baseline_ms * _TIMING_BASELINE_MULTIPLIER,
+        )
+
     def scan(self) -> List[SmuggleResult]:
         """Run all CL.TE, TE.CL, TE.TE probes.  Stop early per technique."""
         self._log("starting CL.TE / TE.CL / TE.TE scan")
@@ -462,6 +483,10 @@ class HTTPSmuggler:
         if baseline is None:
             self._log("could not establish baseline, aborting")
             return self.results
+
+        self._threshold = self._effective_threshold(baseline)
+        self._log(f"effective timing threshold: {self._threshold:.0f}ms "
+                  f"(baseline {baseline:.0f}ms x{_TIMING_BASELINE_MULTIPLIER})")
 
         for name, probe_fn in [
             ("CL.TE", self._probe_cl_te),
@@ -531,10 +556,36 @@ class CRLFDesyncScanner:
         self.use_tls = use_tls
         self.verbose = verbose
         self.results: List[SmuggleResult] = []
+        self._threshold = _TIMING_MIN_ABSOLUTE_MS
 
     def _log(self, msg: str):
         if self.verbose:
             print(f"  [crlf-desync] {msg}")
+
+    def _baseline(self) -> Optional[float]:
+        """Get baseline timing for threshold calibration."""
+        sock = None
+        try:
+            sock = _make_socket(self.host, self.port, self.use_tls)
+            hdr = _host_header(self.host, self.port, self.use_tls)
+            req = (
+                f"GET {self.path} HTTP/1.1\r\n"
+                f"Host: {hdr}\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+            ).encode()
+            _, ms = _timed_send_recv(sock, req, timeout=_BASELINE_TIMEOUT)
+            self._log(f"baseline: {ms:.0f}ms")
+            return ms
+        except Exception as exc:
+            self._log(f"baseline failed: {exc}")
+            return None
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def _build_request(self, injection_point: str, payload: str,
                        marker: str) -> bytes:
@@ -627,10 +678,10 @@ class CRLFDesyncScanner:
                     confirmed = True
                     confidence = "medium"
                     detail = f"Followup status {status2} after TE/CL CRLF injection"
-            elif total > _TIMING_THRESHOLD_MS:
+            elif total > self._threshold and not _is_timeout(t1) and not _is_timeout(t2):
                 confirmed = True
                 confidence = "low"
-                detail = f"Timing anomaly: {total:.0f}ms after CRLF injection"
+                detail = f"Timing anomaly: {total:.0f}ms after CRLF injection (threshold {self._threshold:.0f}ms)"
 
             if confirmed:
                 return SmuggleResult(
@@ -656,6 +707,16 @@ class CRLFDesyncScanner:
 
     def scan(self) -> List[SmuggleResult]:
         self._log("starting CRLF desync scan")
+        baseline = self._baseline()
+        if baseline is not None:
+            self._threshold = max(
+                _TIMING_MIN_ABSOLUTE_MS,
+                baseline * _TIMING_BASELINE_MULTIPLIER,
+            )
+            self._log(f"effective threshold: {self._threshold:.0f}ms "
+                      f"(baseline {baseline:.0f}ms x{_TIMING_BASELINE_MULTIPLIER})")
+        else:
+            self._log(f"no baseline, using absolute threshold: {self._threshold:.0f}ms")
         for point in _CRLF_INJECTION_POINTS:
             found = False
             for payload_tmpl in _CRLF_PAYLOADS:
@@ -1013,19 +1074,41 @@ class HTTPTerminator:
             # If response 2 leaks state from response 1 (e.g. same auth
             # cookies, same routing path content), flag it
             if status1 == 200 and status2 == 200 and marker not in resp2_text:
-                # Response 2 returned 200 for a path that should not exist
-                # AND doesn't contain the marker in the URL reflection --
-                # could be the server reusing state from connection 1
-                return SmuggleResult(
-                    technique="Connection-state abuse",
-                    endpoint=f"{self.host}:{self.port}{self.path}",
-                    confirmed=True,
-                    confidence="low",
-                    probe_sent=_decode(req1 + req2),
-                    response_snippet=_snippet(resp2),
-                    timing_ms=total,
-                    detail=f"Second request to /{marker} got 200 (possible state leak)",
-                )
+                resp1_text = _decode(resp1)
+                # SPA catch-all check: if both responses have near-identical
+                # body sizes and contain SPA framework markers, this is just a
+                # catch-all route serving the same shell for any path
+                is_catchall = False
+                spa_markers = ["<div id=\"app\"", "<div id=\"root\"",
+                               "__NEXT_DATA__", "ng-app", "window.__NUXT__",
+                               "<script src=\"/js/", "<script src=\"/static/js/",
+                               "<!doctype html>"]
+                for m in spa_markers:
+                    if m in resp2_text.lower() or m in resp2_text:
+                        is_catchall = True
+                        break
+                # Also check body similarity: if resp1 and resp2 are the same
+                # size (within 5%), it's a catch-all
+                body1 = resp1_text.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in resp1_text else resp1_text
+                body2 = resp2_text.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in resp2_text else resp2_text
+                if body1 and body2:
+                    size_ratio = len(body2) / max(len(body1), 1)
+                    if 0.95 <= size_ratio <= 1.05:
+                        is_catchall = True
+                if is_catchall:
+                    self._log(f"Connection-state: skipping - SPA catch-all detected "
+                              f"(/{marker} got same content as {self.path})")
+                else:
+                    return SmuggleResult(
+                        technique="Connection-state abuse",
+                        endpoint=f"{self.host}:{self.port}{self.path}",
+                        confirmed=True,
+                        confidence="low",
+                        probe_sent=_decode(req1 + req2),
+                        response_snippet=_snippet(resp2),
+                        timing_ms=total,
+                        detail=f"Second request to /{marker} got 200 (possible state leak)",
+                    )
             return None
         except Exception as exc:
             self._log(f"Connection-state error: {exc}")

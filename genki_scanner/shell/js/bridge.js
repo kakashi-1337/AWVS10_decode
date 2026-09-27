@@ -386,8 +386,9 @@ class TReportItem {
         const xmlPath = path.join(SHELL_CONFIG.scriptsDir, 'XML', fname);
         try {
             const content = fs.readFileSync(xmlPath, 'utf-8');
-            const nameMatch = content.match(/<name>(.*?)<\/name>/s);
-            const sevMatch = content.match(/<severity>(.*?)<\/severity>/s);
+            // AWVS10 XML stores name/severity as attributes on <TestDescription>
+            const nameMatch = content.match(/name="([^"]+)"/);
+            const sevMatch = content.match(/severity="([^"]+)"/);
             if (nameMatch) this.name = nameMatch[1].trim();
             if (sevMatch) this.severity = sevMatch[1].trim();
         } catch {
@@ -398,7 +399,11 @@ class TReportItem {
     setHttpInfo(job) {
         const reqHeaders = Object.assign({}, SHELL_CONFIG.defaultHeaders || {}, job._reqHeaders || {});
         const reqHeaderLines = Object.entries(reqHeaders).map(([k,v]) => `${k}: ${v}`).join('\r\n');
-        const rawReq = `${job.verb || 'GET'} ${job.URI || '/'} HTTP/1.1\r\nHost: ${job.host || ''}\r\n${reqHeaderLines}${job._body ? '\r\n\r\n' + job._body : '\r\n'}`;
+        let reqPath = job.URI || '/';
+        if (reqPath === '/' && job.url && typeof job.url === 'object' && job.url.path) {
+            reqPath = job.url.path;
+        }
+        const rawReq = `${job.verb || 'GET'} ${reqPath} HTTP/1.1\r\nHost: ${job.host || ''}\r\n${reqHeaderLines}${job._body ? '\r\n\r\n' + job._body : '\r\n'}`;
         this._httpInfo = {
             url: job._buildUrl ? job._buildUrl() : '',
             verb: job.verb || '',
