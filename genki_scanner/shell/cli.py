@@ -87,6 +87,10 @@ Examples:
         "--no-dirs", action="store_true",
         help="Skip directory enumeration",
     )
+    scan_group.add_argument(
+        "--skipfuzz", action="store_true",
+        help="Skip PerScheme fuzzing phase (input parameter testing)",
+    )
 
     browser_group = parser.add_argument_group("browser crawl")
     browser_group.add_argument(
@@ -217,6 +221,13 @@ def main():
         ]]
     if args.no_dirs and phases:
         phases = [p for p in phases if p != "dirs"]
+
+    if args.skipfuzz:
+        if phases:
+            phases = [p for p in phases if p != "PerScheme"]
+        else:
+            phases = ["PerServer", "PerFolder", "PerFile", "PostCrawl", "PostScan",
+                       "WebApps", "ports", "dirs"]
 
     orchestrator = ShellOrchestrator(scripts_dir, config)
 
