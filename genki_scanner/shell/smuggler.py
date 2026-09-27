@@ -64,17 +64,30 @@ def _parse_target(url: str):
     return host, port, path, use_tls
 
 
+_PROBE_DELAY = 0.15
+
 def _make_socket(host: str, port: int, use_tls: bool, timeout: float = _CONNECT_TIMEOUT):
-    """Open a TCP (optionally TLS) socket to the target."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.connect((host, port))
-    if use_tls:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        sock = ctx.wrap_socket(sock, server_hostname=host)
-    return sock
+    """Open a TCP (optionally TLS) socket to the target.
+    Retries on buffer exhaustion (WinError 10055 / ENOBUFS)."""
+    for attempt in range(4):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            if use_tls:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            return sock
+        except OSError as exc:
+            err_code = getattr(exc, 'winerror', None) or getattr(exc, 'errno', 0)
+            if err_code in (10055, 105, 55):
+                delay = 2 ** attempt
+                time.sleep(delay)
+                continue
+            raise
+    raise OSError("socket buffer exhaustion after 4 retries")
 
 
 def _send_recv(sock, payload: bytes, timeout: float = _RECV_TIMEOUT) -> bytes:
@@ -498,7 +511,8 @@ class HTTPSmuggler:
                 if result:
                     self.results.append(result)
                     self._log(f"{name} confirmed with TE variant #{idx}")
-                    break  # stop on first confirmed desync for this technique
+                    break
+                time.sleep(_PROBE_DELAY)
 
         return self.results
 
@@ -725,9 +739,10 @@ class CRLFDesyncScanner:
                     self.results.append(result)
                     self._log(f"CRLF confirmed at injection point '{point}'")
                     found = True
-                    break  # stop on first confirmed for this injection point
+                    break
+                time.sleep(_PROBE_DELAY)
             if found:
-                continue  # move to next injection point
+                continue
         return self.results
 
 
@@ -1289,6 +1304,7 @@ class HTTPTerminator:
             if result:
                 self.results.append(result)
                 self._log(f"{name} confirmed")
+            time.sleep(_PROBE_DELAY)
         return self.results
 
 

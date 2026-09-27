@@ -206,6 +206,64 @@ class Scheme:
         return scheme
 
     @classmethod
+    def from_api_call(cls, api_call):
+        """Create a scheme from an intercepted ApiCall with real params."""
+        scheme = cls(api_call.url, api_call.method.upper())
+        parsed = urlparse(api_call.url)
+
+        API_FLAGS = (cls.INPUT_FLAG_REFLECTION_TESTS |
+                     cls.INPUT_FLAG_CAN_BE_ARRAY |
+                     cls.INPUT_FLAG_HAS_NAME)
+
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        for name, values in query_params.items():
+            val = values[0] if values else ""
+            flags = API_FLAGS
+            if val.isdigit():
+                flags |= cls.INPUT_FLAG_NUMERIC
+            scheme.add_input(name, val, "URL encoded GET", flags)
+
+        for name, val in api_call.params.items():
+            if name in query_params:
+                continue
+            flags = API_FLAGS
+            if isinstance(val, str) and val.isdigit():
+                flags |= cls.INPUT_FLAG_NUMERIC
+            input_type = "URL encoded POST" if scheme.method == "POST" else "URL encoded GET"
+            scheme.add_input(name, str(val), input_type, flags)
+
+        if api_call.json_fields:
+            for field_name in api_call.json_fields:
+                already = any(i.name == field_name for i in scheme.inputs)
+                if already:
+                    continue
+                scheme.add_input(field_name, "test", "JSON body", API_FLAGS)
+
+        path_parts = (parsed.path or "/").split('/')
+        for part in path_parts:
+            if part.startswith(':') or (part.startswith('{') and part.endswith('}')):
+                param_name = part.strip(':{}')
+                scheme.add_input(param_name, "1", "URL encoded GET",
+                                 API_FLAGS | cls.INPUT_FLAG_NUMERIC)
+
+        for hdr_name, hdr_val in api_call.request_headers.items():
+            low = hdr_name.lower()
+            if low in ("host", "connection", "content-length", "accept-encoding",
+                       "user-agent", "accept", "origin", "referer", "sec-fetch-mode"):
+                continue
+            scheme.add_input(hdr_name, hdr_val, "HTTP Header", API_FLAGS)
+
+        has_auth = any(i.name.lower() == "authorization" for i in scheme.inputs)
+        if not has_auth:
+            scheme.add_input("Authorization", "Bearer test", "HTTP Header", API_FLAGS)
+
+        if scheme.inputs:
+            var_vals = {i.name: i.value for i in scheme.inputs}
+            scheme.add_variation(var_vals)
+
+        return scheme
+
+    @classmethod
     def from_form(cls, action_url, method, params):
         """Create a scheme from a discovered form."""
         scheme = cls(action_url, method.upper())
@@ -291,6 +349,24 @@ class SiteTree:
             sf = SiteFile(action_url)
             sf.add_scheme(scheme)
             self.all_files[action_url] = sf
+
+        return scheme
+
+    def add_api_call(self, api_call):
+        """Add a real intercepted ApiCall with its actual params/headers."""
+        scheme = Scheme.from_api_call(api_call)
+        self.all_schemes.append(scheme)
+
+        parsed = urlparse(api_call.url)
+        directory = "/".join(parsed.path.split("/")[:-1]) + "/"
+        self.all_directories.add(directory)
+
+        if api_call.url not in self.all_files:
+            sf = SiteFile(api_call.url)
+            sf.add_scheme(scheme)
+            self.all_files[api_call.url] = sf
+        else:
+            self.all_files[api_call.url].add_scheme(scheme)
 
         return scheme
 

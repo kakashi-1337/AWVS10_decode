@@ -66,10 +66,25 @@ async def _async_crawl(target_urls, config, max_depth, max_pages):
                     form.get("params", form.get("inputs", [])),
                 )
 
-            for api_ep in result.api_endpoints:
-                tree.add_url(api_ep)
+            for api_call in result.api_calls:
+                tree.add_api_call(api_call)
 
-            print(f"  [BROWSER] {len(result.urls)} URLs, {len(result.forms)} forms, {len(result.api_endpoints)} API endpoints")
+            for api_ep in result.api_endpoints:
+                if api_ep not in tree.all_files:
+                    tree.add_api_endpoint(api_ep)
+
+            for route in getattr(result, "spa_routes", set()):
+                full_url = f"{parsed.scheme}://{parsed.hostname}{route}"
+                if full_url not in tree.all_files:
+                    tree.add_url(full_url)
+
+            api_call_count = len(result.api_calls)
+            api_ep_count = len(result.api_endpoints)
+            spa_count = len(getattr(result, "spa_routes", set()))
+            rendered_count = len(getattr(result, "rendered_html", {}))
+            print(f"  [BROWSER] {len(result.urls)} URLs, {len(result.forms)} forms, "
+                  f"{api_call_count} API calls, {api_ep_count} API endpoints, "
+                  f"{spa_count} SPA routes, {rendered_count} rendered pages")
 
             dom = DOMAnalyzer(engine)
             page = await engine.new_page()
@@ -80,6 +95,9 @@ async def _async_crawl(target_urls, config, max_depth, max_pages):
                 print(f"  [BROWSER] {len(dom_result['dom_xss']['flows'])} DOM XSS flows detected (pre-scan)")
 
             _mark_reflection_inputs(tree, engine)
+
+            tree._rendered_html = getattr(result, "rendered_html", {})
+            tree._tokens_found = getattr(result, "tokens_found", [])
 
             cookies = await engine.get_cookies()
             tree._browser_cookies = cookies
