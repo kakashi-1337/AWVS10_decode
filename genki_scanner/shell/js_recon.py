@@ -38,6 +38,8 @@ def _run_node(script_path, input_data=None, args=None, timeout=120):
             timeout=timeout,
             input=json.dumps(input_data) if input_data else None,
             cwd=str(script_path.parent),
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return {"error": result.stderr[:500]}

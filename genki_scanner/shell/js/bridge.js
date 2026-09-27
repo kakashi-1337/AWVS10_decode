@@ -966,6 +966,7 @@ function makeSiteFile(props) {
     };
     sf.getNextSibling = sf.getNext;
     sf.getFirstVariation = function() { return sf._variations.length > 0 ? sf._variations[0] : null; };
+    sf.getVariation = function(hash) { return sf._variations.length > 0 ? sf._variations[0] : null; };
     sf.hasVariations = sf._variations.length > 0;
     if (!sf._schemes) sf._schemes = [];
     sf.schemeCount = sf._schemes.length;
@@ -1001,9 +1002,32 @@ function _output(type, data) {
     process.stdout.write(msg);
 }
 
+// ---- TInjectionValidator ----
+class TInjectionValidator {
+    constructor(startMark, endMark) {
+        this.startMark = startMark || 'ACUSTART';
+        this.endMark = endMark || 'ACUEND';
+    }
+    _check(item) {
+        if (!item || typeof item !== 'string') return false;
+        const s = item.indexOf(this.startMark);
+        if (s === -1) return false;
+        return item.indexOf(this.endMark, s + this.startMark.length) !== -1;
+    }
+    isPathInjection(item) { return this._check(item); }
+    isMySQLInjection(item) { return this._check(item); }
+    isMSSQLInjection(item) { return this._check(item); }
+    isPostgreSQLInjection(item) { return this._check(item); }
+    isSQLiteInjection(item) { return this._check(item); }
+    isOracleSQLInjection(item) { return this._check(item); }
+    isSybaseSQLInjection(item) { return this._check(item); }
+    isShellCodeInjection(item) { return this._check(item); }
+    isPHPCodeInjection(item) { return this._check(item); }
+}
+
 module.exports = {
     THTTPJob, THTTPResponse, THTTPRequest, TURL, TSocket,
-    TReportItem, TKBaseItem, TList, TStringList,
+    TReportItem, TKBaseItem, TList, TStringList, TInjectionValidator,
     THTTPWorker, SHELL_CONFIG, SHELL_STATE,
     AddReportItem, AddKBItem, ScriptProgress,
     getGlobalValue, setGlobalValue,

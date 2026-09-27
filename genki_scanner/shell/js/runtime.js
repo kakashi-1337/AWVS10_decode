@@ -27,6 +27,7 @@ function buildSandbox() {
         TList: bridge.TList,
         TStringList: bridge.TStringList,
         THTMLQuery: THTMLQuery,
+        TInjectionValidator: bridge.TInjectionValidator,
 
         // global functions
         AddReportItem: bridge.AddReportItem,
@@ -100,6 +101,7 @@ function buildSandbox() {
         ScanIP: '',
         oobDomain: '',
         SetGlobalValue: bridge.setGlobalValue,
+        engineVersion: 0x301,
     };
 }
 

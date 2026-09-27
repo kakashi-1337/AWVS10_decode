@@ -27,6 +27,8 @@ def run_js_worker(script_name, args=None, input_data=None, timeout=60):
             timeout=timeout,
             input=json.dumps(input_data) if input_data else None,
             cwd=str(WORKERS_DIR),
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return {"error": result.stderr[:500], "stdout": result.stdout[:500]}

@@ -1,6 +1,26 @@
 'use strict';
 const bridge = require('./bridge');
 
+class COMCollection {
+    constructor(arr) { this._arr = arr || []; this.length = this._arr.length; this.count = this._arr.length; }
+    item(i) { return i < this._arr.length ? this._arr[i] : undefined; }
+    [Symbol.iterator]() { return this._arr[Symbol.iterator](); }
+}
+
+class VariationValues {
+    constructor(valuesObj, inputs) {
+        this._values = valuesObj || {};
+        this._inputs = inputs || [];
+    }
+    item(inputIndex) {
+        if (inputIndex < this._inputs.length) {
+            const name = this._inputs[inputIndex].name;
+            return name in this._values ? this._values[name] : this._inputs[inputIndex].value;
+        }
+        return '';
+    }
+}
+
 class SchemeProxy {
     constructor(data) {
         this._data = data || {};
@@ -15,6 +35,7 @@ class SchemeProxy {
         this.path = data.path || '/';
         this.hash = data.hash || '';
         this.internalId = data.internalId || '';
+        this.variationHash = data.variationHash || '';
     }
 
     get inputCount() { return this._inputs.length; }
@@ -35,6 +56,13 @@ class SchemeProxy {
     setInputValue(i, value) {
         if (i >= 0 && i < this._inputs.length) {
             this._inputs[i].value = String(value);
+        }
+    }
+
+    setEncodedInputValue(i, value) {
+        if (i >= 0 && i < this._inputs.length) {
+            this._inputs[i].value = String(value);
+            this._inputs[i]._encoded = true;
         }
     }
 
@@ -62,7 +90,7 @@ class SchemeProxy {
         for (let i = 0; i < this._variations.length; i++) {
             result.push(i);
         }
-        return result.length > 0 ? result : [0];
+        return new COMCollection(result.length > 0 ? result : [0]);
     }
 
     setTempInputName(i, name) {
@@ -93,7 +121,8 @@ class SchemeProxy {
     get targetHasAcuSensor() { return false; }
 
     getVariation(idx) {
-        return idx < this._variations.length ? this._variations[idx] : {};
+        const v = idx < this._variations.length ? this._variations[idx] : {};
+        return new VariationValues(v, this._inputs);
     }
 
     randomizeValues() {
