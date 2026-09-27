@@ -74,7 +74,10 @@ async def _async_crawl(target_urls, config, max_depth, max_pages):
                     tree.add_api_endpoint(api_ep)
 
             for route in getattr(result, "spa_routes", set()):
-                full_url = f"{parsed.scheme}://{parsed.hostname}{route}"
+                if route.startswith(("http://", "https://")):
+                    full_url = route
+                else:
+                    full_url = f"{parsed.scheme}://{parsed.hostname}{route}"
                 if full_url not in tree.all_files:
                     tree.add_url(full_url)
 

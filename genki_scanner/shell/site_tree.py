@@ -161,8 +161,8 @@ class Scheme:
         return scheme
 
     @classmethod
-    def from_api_endpoint(cls, url, method="GET"):
-        """Create a scheme from a discovered API endpoint with synthesized inputs."""
+    def from_api_endpoint(cls, url, method="GET", extracted_params=None):
+        """Create a scheme from a discovered API endpoint with synthesized or extracted inputs."""
         scheme = cls(url, method)
         parsed = urlparse(url)
         path = parsed.path or "/"
@@ -189,13 +189,73 @@ class Scheme:
                                  API_FLAGS | cls.INPUT_FLAG_NUMERIC)
                 scheme.add_variation({param_name: "1"})
 
-        if not scheme.inputs:
+        if extracted_params:
+            variation = {}
+            for p in extracted_params:
+                pname = p["name"] if isinstance(p, dict) else p
+                ptype = p.get("type", "JSON body") if isinstance(p, dict) else "JSON body"
+                flags = API_FLAGS
+                val = "test"
+                if pname.lower() in ('id', 'user_id', 'account_id', 'accountId', 'userId',
+                                     'amount', 'quantity', 'count', 'page', 'limit', 'offset',
+                                     'size', 'num', 'number', 'port', 'pin', 'otp', 'code'):
+                    val = "1"
+                    flags |= cls.INPUT_FLAG_NUMERIC
+                elif pname.lower() in ('email', 'mail'):
+                    val = "test@test.com"
+                elif pname.lower() in ('url', 'link', 'redirect', 'callback', 'next',
+                                       'return', 'returnUrl', 'redirect_uri'):
+                    val = "https://evil.com"
+                elif pname.lower() in ('password', 'passwd', 'pass', 'pwd'):
+                    val = "Test123!"
+                elif pname.lower() in ('phone', 'mobile', 'cellphone'):
+                    val = "+639170000000"
+                scheme.add_input(pname, val, ptype, flags)
+                variation[pname] = val
+            if variation:
+                scheme.add_variation(variation)
+        elif not scheme.inputs:
             if method in ("POST", "PUT", "PATCH"):
-                scheme.add_input("id", "1", "JSON body",
-                                 API_FLAGS | cls.INPUT_FLAG_NUMERIC)
-                scheme.add_input("name", "test", "JSON body", API_FLAGS)
-                scheme.add_input("value", "test", "JSON body", API_FLAGS)
-                scheme.add_variation({"id": "1", "name": "test", "value": "test"})
+                variation = {}
+                path_lower = path.lower()
+                if any(k in path_lower for k in ('login', 'signin', 'auth', 'authenticate')):
+                    for pn, pv in [("email", "test@test.com"), ("password", "Test123!")]:
+                        scheme.add_input(pn, pv, "JSON body", API_FLAGS)
+                        variation[pn] = pv
+                elif any(k in path_lower for k in ('register', 'signup', 'createuser', 'create-user')):
+                    for pn, pv in [("email", "test@test.com"), ("password", "Test123!"),
+                                   ("phone", "+639170000000"), ("name", "test")]:
+                        scheme.add_input(pn, pv, "JSON body", API_FLAGS)
+                        variation[pn] = pv
+                elif any(k in path_lower for k in ('password', 'changepass', 'resetpass',
+                                                   'setpass', 'setpin', 'changepin', 'resetpin')):
+                    for pn, pv in [("oldPassword", "Test123!"), ("newPassword", "NewTest456!"),
+                                   ("otp", "123456")]:
+                        scheme.add_input(pn, pv, "JSON body", API_FLAGS)
+                        variation[pn] = pv
+                elif any(k in path_lower for k in ('otp', 'opt', 'verify', 'confirm', 'validate',
+                                                   'check', 'sendcode')):
+                    for pn, pv in [("otp", "123456"), ("phone", "+639170000000"),
+                                   ("code", "123456")]:
+                        fl = API_FLAGS | cls.INPUT_FLAG_NUMERIC if pn in ('otp', 'code') else API_FLAGS
+                        scheme.add_input(pn, pv, "JSON body", fl)
+                        variation[pn] = pv
+                elif any(k in path_lower for k in ('transfer', 'send', 'topup', 'top-up', 'cashout',
+                                                   'cash-out', 'withdraw', 'payment', 'pay', 'remit')):
+                    for pn, pv, fl in [("amount", "1", API_FLAGS | cls.INPUT_FLAG_NUMERIC),
+                                       ("userId", "1", API_FLAGS | cls.INPUT_FLAG_NUMERIC),
+                                       ("accountId", "1", API_FLAGS | cls.INPUT_FLAG_NUMERIC),
+                                       ("pin", "123456", API_FLAGS | cls.INPUT_FLAG_NUMERIC)]:
+                        scheme.add_input(pn, pv, "JSON body", fl)
+                        variation[pn] = pv
+                else:
+                    for pn, pv, fl in [("id", "1", API_FLAGS | cls.INPUT_FLAG_NUMERIC),
+                                       ("name", "test", API_FLAGS),
+                                       ("value", "test", API_FLAGS)]:
+                        scheme.add_input(pn, pv, "JSON body", fl)
+                        variation[pn] = pv
+                if variation:
+                    scheme.add_variation(variation)
             else:
                 scheme.add_input("id", "1", "URL encoded GET",
                                  API_FLAGS | cls.INPUT_FLAG_NUMERIC)
@@ -370,8 +430,8 @@ class SiteTree:
 
         return scheme
 
-    def add_api_endpoint(self, url, method="GET"):
-        scheme = Scheme.from_api_endpoint(url, method)
+    def add_api_endpoint(self, url, method="GET", extracted_params=None):
+        scheme = Scheme.from_api_endpoint(url, method, extracted_params)
         self.all_schemes.append(scheme)
 
         parsed = urlparse(url)

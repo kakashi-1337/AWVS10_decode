@@ -1169,8 +1169,66 @@ class ShellOrchestrator:
 
         return links, forms, api_endpoints, emails_found
 
+    def _extract_wrapper_params(self, js_code, match_start, match_end):
+        """Extract param names from {url,method,data:{...}} wrapper patterns."""
+        WRAPPER_KEYS = {'url', 'method', 'data', 'params', 'headers', 'timeout',
+                        'baseURL', 'responseType', 'withCredentials', 'config'}
+        snippet = js_code[match_end:match_end + 600]
+        params = []
+
+        data_match = re.search(r'data\s*:\s*\{([^}]{1,400})\}', snippet)
+        if data_match:
+            for part in re.split(r'[,{}]', data_match.group(1)):
+                km = re.match(r'\s*["\']?(\w+)["\']?\s*(?:$|:)', part.strip())
+                if km:
+                    name = km.group(1)
+                    if name.lower() not in WRAPPER_KEYS and not name.startswith('_'):
+                        params.append(name)
+            return params[:15]
+
+        context_before = js_code[max(0, match_start - 500):match_start]
+        for obj_m in re.finditer(r'\{([^}]{5,400})\}\s*$', context_before):
+            body = obj_m.group(1)
+            if re.search(r'(?:url|method)\s*:', body):
+                continue
+            for part in re.split(r'[,{}]', body):
+                km = re.match(r'\s*["\']?(\w+)["\']?\s*(?:$|:)', part.strip())
+                if km:
+                    name = km.group(1)
+                    if name.lower() not in WRAPPER_KEYS and not name.startswith('_'):
+                        params.append(name)
+            if params:
+                return params[:15]
+
+        return params
+
+    def _extract_params_from_js_call(self, js_code, match_end):
+        """Extract parameter names from the object literal following an API call."""
+        FETCH_OPTS = {'method', 'headers', 'body', 'params', 'timeout', 'cache',
+                      'credentials', 'signal', 'mode', 'redirect', 'referrer',
+                      'referrerPolicy', 'integrity', 'keepalive', 'window',
+                      'responseType', 'baseURL', 'withCredentials', 'transformRequest',
+                      'transformResponse', 'cancelToken', 'onUploadProgress',
+                      'onDownloadProgress', 'validateStatus', 'maxRedirects'}
+        snippet = js_code[match_end:match_end + 400]
+        params = []
+
+        obj_match = re.search(r',\s*\{([^}]{1,350})\}', snippet)
+        if not obj_match:
+            return params
+
+        obj_body = obj_match.group(1)
+        for part in re.split(r'[,{}]', obj_body):
+            key_m = re.match(r'\s*["\']?(\w+)["\']?\s*(?:$|:)', part.strip())
+            if key_m:
+                name = key_m.group(1)
+                if name.lower() not in FETCH_OPTS and not name.startswith('_'):
+                    params.append(name)
+
+        return params[:15]
+
     def _extract_api_from_js(self, js_code, base_url):
-        """Extract API endpoints with HTTP methods from JavaScript source code."""
+        """Extract API endpoints with HTTP methods and parameter names from JavaScript."""
         endpoints = {}
         parsed = urlparse(base_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
@@ -1178,29 +1236,65 @@ class ShellOrchestrator:
         static_exts = {'.js', '.css', '.png', '.jpg', '.gif', '.svg', '.ico',
                        '.woff', '.woff2', '.ttf', '.eot', '.map'}
 
-        def _add(path, method="GET"):
+        def _add(path, method="GET", params=None):
             if not path or path.startswith('//'):
                 return
             ext = os.path.splitext(path.split('?')[0])[1].lower()
             if ext in static_exts:
                 return
             url = base + path
-            endpoints.setdefault(url, set()).add(method.upper())
+            ep = endpoints.setdefault(url, {"methods": set(), "params": []})
+            ep["methods"].add(method.upper())
+            if params:
+                for p in params:
+                    if p not in [x["name"] for x in ep["params"]]:
+                        ptype = "JSON body" if method.upper() in ("POST", "PUT", "PATCH") else "URL encoded GET"
+                        ep["params"].append({"name": p, "type": ptype})
 
         for m in re.finditer(
-            r'(?:axios|http)\.(get|post|put|delete|patch)\s*\(\s*["\']([/][^"\']*)["\']',
+            r'(?:axios|http|\$http)\.(get|post|put|delete|patch)\s*\(\s*["\']([/][^"\']*)["\']',
             js_code, re.I
         ):
-            _add(m.group(2), m.group(1))
+            params = self._extract_params_from_js_call(js_code, m.end()) if m.group(1).lower() != 'get' else []
+            _add(m.group(2), m.group(1), params)
 
         for m in re.finditer(r'fetch\s*\(\s*["\']([/][^"\']*)["\']', js_code, re.I):
-            _add(m.group(1), "GET")
+            fetch_snippet = js_code[m.end():m.end() + 300]
+            method = "GET"
+            method_m = re.search(r'method\s*:\s*["\'](\w+)["\']', fetch_snippet)
+            if method_m:
+                method = method_m.group(1)
+            body_params = []
+            body_m = re.search(r'JSON\.stringify\s*\(\s*\{([^}]{1,300})\}', fetch_snippet)
+            if body_m:
+                for part in re.split(r'[,{}]', body_m.group(1)):
+                    km = re.match(r'\s*["\']?(\w+)["\']?\s*(?:$|:)', part.strip())
+                    if km:
+                        body_params.append(km.group(1))
+            _add(m.group(1), method, body_params[:15])
 
         for m in re.finditer(
             r'\.(get|post|put|delete|patch|head|options)\s*(?:<[^>]*>)?\s*\(\s*["\']([/][^"\']+)["\']',
             js_code, re.I
         ):
-            _add(m.group(2), m.group(1))
+            params = self._extract_params_from_js_call(js_code, m.end()) if m.group(1).lower() not in ('get', 'head', 'options') else []
+            _add(m.group(2), m.group(1), params)
+
+        for m in re.finditer(
+            r'\{\s*url\s*:\s*["\']([/][^"\']+)["\']\s*,\s*method\s*:\s*["\'](\w+)["\']',
+            js_code, re.I
+        ):
+            method = m.group(2)
+            params = self._extract_wrapper_params(js_code, m.start(), m.end()) if method.upper() not in ('GET', 'HEAD', 'OPTIONS') else []
+            _add(m.group(1), method, params)
+
+        for m in re.finditer(
+            r'method\s*:\s*["\'](\w+)["\']\s*,\s*url\s*:\s*["\']([/][^"\']+)["\']',
+            js_code, re.I
+        ):
+            method = m.group(1)
+            params = self._extract_wrapper_params(js_code, m.start(), m.end()) if method.upper() not in ('GET', 'HEAD', 'OPTIONS') else []
+            _add(m.group(2), method, params)
 
         no_method_pats = [
             r'(?:url|endpoint|apiUrl|baseUrl|base_url|API_URL|API_BASE|apiBase)\s*[:=]\s*["\']([/][^"\']+)["\']',
@@ -1215,12 +1309,126 @@ class ShellOrchestrator:
 
         return endpoints
 
+    def _fetch_js(self, url, req_lib, headers, delay=0.3):
+        """Download a JS file with retry."""
+        for attempt in range(2):
+            try:
+                resp = req_lib.get(url, timeout=15, verify=False, headers=headers)
+                body = resp.content.decode('utf-8', errors='replace')
+                if resp.status_code == 200 and len(body) > 50:
+                    time.sleep(delay)
+                    return body
+                return None
+            except Exception:
+                if attempt == 0:
+                    time.sleep(1)
+        return None
+
+    def _supplement_tree_with_js(self, tree, target_url, server_info):
+        """Scan JS files and add discovered API endpoints to the site tree."""
+        import requests as req_lib
+        headers = dict(self.config.get("headers", {}))
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
+
+        body = server_info.get("_body", "")
+        if not body:
+            resp = req_lib.get(target_url, timeout=10, verify=False,
+                              headers=headers, allow_redirects=True)
+            body = resp.content.decode('utf-8', errors='replace')
+
+        links, forms, api_endpoints, mailto_emails = self._extract_from_html(body, target_url)
+        parsed_base = urlparse(target_url)
+        same_host = [l for l in links if urlparse(l).hostname == parsed_base.hostname]
+
+        js_urls = [l for l in same_host
+                   if re.search(r'\.js(\?|$)', urlparse(l).path.split('/')[-1])]
+
+        all_api_eps = {}
+        for ep in api_endpoints:
+            all_api_eps[ep] = {"methods": {"GET"}, "params": []}
+
+        if js_urls:
+            print(f"  {C.info('[TREE]')} Scanning {len(js_urls)} JS files for API endpoints + params")
+
+        delay = self.config.get("delay", 1.0) * 0.3
+        chunk_urls = set()
+        js_dir = ""
+
+        for js_url in js_urls[:20]:
+            js_body = self._fetch_js(js_url, req_lib, headers, delay)
+            if not js_body:
+                continue
+
+            js_api_eps = self._extract_api_from_js(js_body, target_url)
+            for url, ep_data in js_api_eps.items():
+                existing = all_api_eps.setdefault(url, {"methods": set(), "params": []})
+                existing["methods"].update(ep_data["methods"])
+                for p in ep_data.get("params", []):
+                    if p["name"] not in [x["name"] for x in existing["params"]]:
+                        existing["params"].append(p)
+
+            if not js_dir:
+                path = urlparse(js_url).path
+                js_dir = path.rsplit('/', 1)[0] + '/' if '/' in path else '/assets/js/'
+
+            for m in re.finditer(r'import\s*\(\s*["\']\.?/?([^"\']+\.js)["\']', js_body):
+                chunk_urls.add(m.group(1))
+            for m in re.finditer(r'["\'](\./[^"\' ]+\.js)["\']', js_body):
+                chunk_urls.add(m.group(1).lstrip('./'))
+
+        if chunk_urls:
+            chunk_base = f"{parsed_base.scheme}://{parsed_base.netloc}{js_dir}"
+            unique_chunks = [c for c in chunk_urls
+                             if not any(c == urlparse(j).path.split('/')[-1] for j in js_urls)]
+            if unique_chunks:
+                print(f"  {C.info('[TREE]')} +{C.bold(str(len(unique_chunks)))} dynamic chunks discovered")
+                chunk_api_count = 0
+                for chunk_name in unique_chunks:
+                    chunk_url = chunk_base + chunk_name.split('/')[-1]
+                    js_body = self._fetch_js(chunk_url, req_lib, headers, delay * 0.5)
+                    if not js_body:
+                        continue
+                    js_api_eps = self._extract_api_from_js(js_body, target_url)
+                    if js_api_eps:
+                        chunk_api_count += len(js_api_eps)
+                    for url, ep_data in js_api_eps.items():
+                        existing = all_api_eps.setdefault(url, {"methods": set(), "params": []})
+                        existing["methods"].update(ep_data["methods"])
+                        for p in ep_data.get("params", []):
+                            if p["name"] not in [x["name"] for x in existing["params"]]:
+                                existing["params"].append(p)
+                if chunk_api_count:
+                    print(f"  {C.info('[TREE]')} +{chunk_api_count} endpoints from chunks")
+
+        added = 0
+        for ep_url, ep_data in all_api_eps.items():
+            if urlparse(ep_url).hostname == parsed_base.hostname:
+                for method in ep_data["methods"]:
+                    tree.add_api_endpoint(ep_url, method, ep_data.get("params"))
+                    added += 1
+
+        if added:
+            param_count = sum(len(ep.get("params", [])) for ep in all_api_eps.values())
+            print(f"  {C.info('[TREE]')} +{C.bold(str(len(all_api_eps)))} API endpoints "
+                  f"({added} schemes, {param_count} extracted params) from JS analysis")
+        return added
+
     def _build_site_tree(self, target_url, server_info):
         """Build site tree from browser crawl data or basic HTTP extraction."""
         if target_url in self.site_trees:
             tree = self.site_trees[target_url]
             print(f"  {C.info('[TREE]')} Browser crawl: {C.bold(str(len(tree.all_files)))} files, "
                   f"{C.bold(str(len(tree.all_schemes)))} schemes, {C.bold(str(len(tree.all_directories)))} dirs")
+            try:
+                self._supplement_tree_with_js(tree, target_url, server_info)
+                print(f"  {C.info('[TREE]')} Total: {C.bold(str(len(tree.all_files)))} files, "
+                      f"{C.bold(str(len(tree.all_schemes)))} schemes, {C.bold(str(len(tree.all_directories)))} dirs")
+            except Exception as e:
+                print(f"  {C.warn('[WARN]')} JS supplement failed: {e}")
             return tree
 
         tree = SiteTree(target_url)
@@ -1258,30 +1466,7 @@ class ShellOrchestrator:
             for form in forms:
                 tree.add_form(form['action'], form['method'], form.get('inputs', []))
 
-            js_urls = [l for l in same_host
-                       if re.search(r'\.js(\?|$)', urlparse(l).path.split('/')[-1])]
-
-            all_api_eps = {ep: {"GET"} for ep in api_endpoints}
-            if js_urls:
-                print(f"  {C.info('[TREE]')} Scanning {min(len(js_urls), 15)} JS files for API endpoints")
-
-            delay = self.config.get("delay", 1.0)
-            for js_url in js_urls[:15]:
-                try:
-                    js_resp = req_lib.get(js_url, timeout=10, verify=False, headers=headers)
-                    js_body = js_resp.content.decode('utf-8', errors='replace')
-                    if js_resp.status_code == 200 and len(js_body) > 50:
-                        js_api_eps = self._extract_api_from_js(js_body, target_url)
-                        for url, methods in js_api_eps.items():
-                            all_api_eps.setdefault(url, set()).update(methods)
-                    time.sleep(delay * 0.3)
-                except Exception:
-                    pass
-
-            for ep_url, methods in all_api_eps.items():
-                if urlparse(ep_url).hostname == parsed_base.hostname:
-                    for method in methods:
-                        tree.add_api_endpoint(ep_url, method)
+            self._supplement_tree_with_js(tree, target_url, server_info)
 
             cookie_parts = []
             for c in cookie_header.split(','):
@@ -1290,7 +1475,6 @@ class ShellOrchestrator:
                     cookie_parts.append(c.split(';')[0].strip())
             tree._cookies = '; '.join(cookie_parts)
 
-            # Also add discovered directories from dir_enum if available
             dir_results = server_info.get("directories", [])
             for d in dir_results:
                 dpath = d.get("path", "")
@@ -1301,9 +1485,6 @@ class ShellOrchestrator:
             print(f"  {C.info('[TREE]')} {C.bold(str(len(tree.all_files)))} files, "
                   f"{C.bold(str(len(tree.all_schemes)))} schemes, "
                   f"{C.bold(str(len(tree.all_directories)))} dirs")
-            if all_api_eps:
-                api_count = sum(len(m) for m in all_api_eps.values())
-                print(f"  {C.info('[TREE]')} {C.bold(str(len(all_api_eps)))} API endpoints ({api_count} schemes) from JS analysis")
 
         except Exception as e:
             print(f"  {C.warn('[WARN]')} Site tree extraction failed: {e}")
