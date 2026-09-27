@@ -101,6 +101,8 @@ function buildSandbox() {
         ScanIP: '',
         oobDomain: '',
         SetGlobalValue: bridge.setGlobalValue,
+        GetGlobalValue: bridge.getGlobalValue,
+        getSequence: (() => { let seq = 0; return () => seq++; })(),
         engineVersion: 0x301,
     };
 }
