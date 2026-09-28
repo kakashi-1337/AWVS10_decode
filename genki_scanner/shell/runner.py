@@ -1305,7 +1305,9 @@ class ShellOrchestrator:
         ]
         for pat in no_method_pats:
             for m in re.finditer(pat, js_code, re.I):
-                _add(m.group(1), "GET")
+                url = base + m.group(1)
+                if url not in endpoints:
+                    _add(m.group(1), "GET")
 
         return endpoints
 
@@ -1356,6 +1358,7 @@ class ShellOrchestrator:
 
         delay = self.config.get("delay", 1.0) * 0.3
         chunk_urls = set()
+        base_urls = set()
         js_dir = ""
 
         for js_url in js_urls[:20]:
@@ -1370,6 +1373,14 @@ class ShellOrchestrator:
                 for p in ep_data.get("params", []):
                     if p["name"] not in [x["name"] for x in existing["params"]]:
                         existing["params"].append(p)
+
+            for bm in re.finditer(
+                r'(?:baseURL|baseUrl|base_url)\s*[:=]\s*["\'](/[^"\']+)["\']',
+                js_body, re.I
+            ):
+                prefix = bm.group(1).rstrip('/')
+                if prefix and len(prefix) > 1 and not prefix.startswith('/assets'):
+                    base_urls.add(prefix)
 
             if not js_dir:
                 path = urlparse(js_url).path
@@ -1404,16 +1415,56 @@ class ShellOrchestrator:
                 if chunk_api_count:
                     print(f"  {C.info('[TREE]')} +{chunk_api_count} endpoints from chunks")
 
+        if base_urls and len(base_urls) > 1:
+            sample_path = None
+            for ep_url in all_api_eps:
+                if urlparse(ep_url).hostname == parsed_base.hostname:
+                    sample_path = urlparse(ep_url).path
+                    break
+            if sample_path:
+                spa_body = server_info.get("_body", "")
+                spa_len = len(spa_body) if spa_body else 0
+                validated = set()
+                for bp in base_urls:
+                    try:
+                        probe = req_lib.post(
+                            f"{parsed_base.scheme}://{parsed_base.netloc}{bp}{sample_path}",
+                            timeout=10, verify=False, headers=headers,
+                            json={"test": "probe"}
+                        )
+                        resp_body = probe.content.decode('utf-8', errors='replace')
+                        if probe.status_code != 405 and (spa_len == 0 or abs(len(resp_body) - spa_len) > 100):
+                            validated.add(bp)
+                    except Exception:
+                        pass
+                if validated:
+                    base_urls = validated
+
+        if base_urls:
+            print(f"  {C.info('[TREE]')} API base URLs detected: {', '.join(sorted(base_urls))}")
+
         added = 0
+        prefixed_eps = {}
         for ep_url, ep_data in all_api_eps.items():
-            if urlparse(ep_url).hostname == parsed_base.hostname:
-                for method in ep_data["methods"]:
-                    tree.add_api_endpoint(ep_url, method, ep_data.get("params"))
-                    added += 1
+            if urlparse(ep_url).hostname != parsed_base.hostname:
+                continue
+            ep_path = urlparse(ep_url).path
+            already_prefixed = any(ep_path.startswith(b + '/') for b in base_urls)
+            if base_urls and not already_prefixed:
+                for base_prefix in base_urls:
+                    new_url = f"{parsed_base.scheme}://{parsed_base.netloc}{base_prefix}{ep_path}"
+                    prefixed_eps[new_url] = ep_data
+            else:
+                prefixed_eps[ep_url] = ep_data
+
+        for ep_url, ep_data in prefixed_eps.items():
+            for method in ep_data["methods"]:
+                tree.add_api_endpoint(ep_url, method, ep_data.get("params"))
+                added += 1
 
         if added:
-            param_count = sum(len(ep.get("params", [])) for ep in all_api_eps.values())
-            print(f"  {C.info('[TREE]')} +{C.bold(str(len(all_api_eps)))} API endpoints "
+            param_count = sum(len(ep.get("params", [])) for ep in prefixed_eps.values())
+            print(f"  {C.info('[TREE]')} +{C.bold(str(len(prefixed_eps)))} API endpoints "
                   f"({added} schemes, {param_count} extracted params) from JS analysis")
         return added
 
