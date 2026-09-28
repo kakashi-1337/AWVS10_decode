@@ -406,12 +406,14 @@ class TReportItem {
         const rawReq = `${job.verb || 'GET'} ${reqPath} HTTP/1.1\r\nHost: ${job.host || ''}\r\n${reqHeaderLines}${job._body ? '\r\n\r\n' + job._body : '\r\n'}`;
         this._httpInfo = {
             url: job._buildUrl ? job._buildUrl() : '',
+            fullURL: job._buildUrl ? job._buildUrl() : (job.url ? job.url.url : ''),
             verb: job.verb || '',
             status: job.responseStatus || 0,
             duration: job.responseDuration || 0,
             requestHeaders: reqHeaders,
             rawRequest: rawReq,
             rawResponseHeaders: job.response ? job.response.headersString : '',
+            responseContentType: job.response ? (job.response.headers['content-type'] || '') : '',
             responseBody: job.response ? job.response.body.substring(0, 32000) : '',
         };
         if (job.request) this.request = job.request.toString();
@@ -524,10 +526,21 @@ function isCatchallResponse(body, status) {
 
 // ---- Global Functions (matching AWVS engine) ----
 
+function _isApiResponse(httpInfo) {
+    if (!httpInfo) return false;
+    const ct = (httpInfo.responseContentType || httpInfo.contentType || '').toLowerCase();
+    if (ct.includes('json') || ct.includes('xml') || ct.includes('javascript')) return true;
+    const body = (httpInfo.responseBody || '').trimStart();
+    if (body.startsWith('{') || body.startsWith('[') || body.startsWith('<?xml')) return true;
+    const url = (httpInfo.url || httpInfo.fullURL || '').toLowerCase();
+    if (/\/api\/|\/rest\/|\/v[0-9]+\/|\/graphql/.test(url)) return true;
+    return false;
+}
+
 function AddReportItem(ri) {
     const httpInfo = ri._httpInfo || null;
     if (httpInfo && httpInfo.status === 200 && httpInfo.responseBody) {
-        if (isCatchallResponse(httpInfo.responseBody, 200)) {
+        if (!_isApiResponse(httpInfo) && isCatchallResponse(httpInfo.responseBody, 200)) {
             _output('catchall_filtered', {
                 name: ri.name || ri.Name || '',
                 affects: ri.affects || ri.Affects || '',
