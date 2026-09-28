@@ -1,0 +1,264 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// ASP.NET advanced: ViewState deserialization, Blazor, SignalR, .NET config exposure
+
+function testViewStateDeserialization() {
+    // Check if ViewState MAC validation is disabled (enables deserialization attacks)
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 == 200) {
+        var body = job.response.body;
+        var vsMatch = body.match(/__VIEWSTATE[^>]*value="([^"]+)"/);
+
+        if (vsMatch && vsMatch[1]) {
+            var vsValue = vsMatch[1];
+
+            // Test with tampered ViewState
+            var job2 = new THTTPJob();
+            job2.url = targetUrl;
+            job2.URI = "/";
+            job2.verb = "POST";
+            job2.postData = "__VIEWSTATE=" + encodeURIComponent(vsValue + "TAMPERED") +
+                "&__VIEWSTATEGENERATOR=0000&__EVENTVALIDATION=";
+            job2.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            job2.execute();
+
+            if (!job2.wasError) {
+                if (job2.response.msg2 == 200) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = "/";
+                    ri.alertPath = "Scripts/ASP.NET";
+                    ri.name = "ASP.NET ViewState MAC Validation Possibly Disabled";
+                    ri.severity = 4;
+                    ri.setHttpInfo(job2);
+                    ri.details = "Tampered ViewState was accepted without error.[break]" +
+                        "If MAC validation is disabled (enableViewStateMac=false), " +
+                        "this enables .NET deserialization attacks via ysoserial.net payloads.[break]" +
+                        "Gadgets: ObjectDataProvider, TypeConfuseDelegate, PSObject, ActivitySurrogate, " +
+                        "TextFormattingRunProperties, WindowsIdentity, ClaimsIdentity.[break]" +
+                        "Tool: ysoserial.net -p ViewState -g TextFormattingRunProperties -c 'cmd'";
+                    AddReportItem(ri);
+                }
+
+                var body2 = job2.response.body;
+                if (body2.indexOf("MAC") != -1 || body2.indexOf("validation") != -1 ||
+                    body2.indexOf("ViewState") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = "/";
+                    ri.alertPath = "Scripts/ASP.NET";
+                    ri.name = "ASP.NET ViewState Validation Error Disclosed";
+                    ri.severity = 2;
+                    ri.setHttpInfo(job2);
+                    ri.details = "ViewState tampering produces detailed error messages.[break]" +
+                        "Confirms ViewState is in use and may leak validation key length/algorithm.";
+                    AddReportItem(ri);
+                }
+            }
+        }
+    }
+}
+
+function testBlazorExposure() {
+    var blazorPaths = [
+        "/_blazor",
+        "/_blazor/negotiate",
+        "/_framework/blazor.boot.json",
+        "/_framework/blazor.webassembly.js",
+    ];
+
+    for (var i = 0; i < blazorPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = blazorPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("blazor") != -1 || body.indexOf("Blazor") != -1 ||
+                body.indexOf("negotiate") != -1 || body.indexOf("assembly") != -1) {
+
+                if (blazorPaths[i].indexOf("boot.json") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = blazorPaths[i];
+                    ri.alertPath = "Scripts/ASP.NET";
+                    ri.name = "Blazor WebAssembly Boot Manifest Exposed";
+                    ri.severity = 2;
+                    ri.setHttpInfo(job);
+                    ri.details = "Blazor boot.json exposes all .NET assemblies (DLLs) loaded in the browser.[break]" +
+                        "Assemblies can be downloaded, decompiled (ILSpy/dnSpy) to extract:[break]" +
+                        "- Business logic, validation rules, API keys[break]" +
+                        "- Authorization checks (client-side only = bypassable)[break]" +
+                        "- Internal API endpoint patterns";
+                    AddReportItem(ri);
+                }
+
+                if (blazorPaths[i].indexOf("negotiate") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = blazorPaths[i];
+                    ri.alertPath = "Scripts/ASP.NET";
+                    ri.name = "Blazor Server SignalR Negotiate Endpoint";
+                    ri.severity = 1;
+                    ri.setHttpInfo(job);
+                    ri.details = "Blazor Server negotiate endpoint accessible.[break]" +
+                        "SignalR hub may be callable directly for unauthorized method invocation.";
+                    AddReportItem(ri);
+                }
+                break;
+            }
+        }
+    }
+}
+
+function testSignalR() {
+    var signalrPaths = [
+        "/signalr/negotiate",
+        "/signalr/hubs",
+        "/chat/negotiate",
+        "/chatHub/negotiate",
+        "/notificationHub/negotiate",
+        "/hub/negotiate",
+    ];
+
+    for (var i = 0; i < signalrPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = signalrPaths[i];
+        job.verb = "POST";
+        job.postData = "";
+        job.request.addHeader("Content-Type", "text/plain");
+        job.execute();
+
+        if (!job.wasError && (job.response.msg2 == 200 || job.response.msg2 == 400)) {
+            var body = job.response.body;
+            if (body.indexOf("connectionId") != -1 || body.indexOf("negotiateVersion") != -1 ||
+                body.indexOf("availableTransports") != -1 || body.indexOf("connectionToken") != -1) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = signalrPaths[i];
+                ri.alertPath = "Scripts/ASP.NET";
+                ri.name = "ASP.NET SignalR Hub Exposed";
+                ri.severity = 2;
+                ri.setHttpInfo(job);
+                ri.details = "SignalR hub negotiate endpoint accessible at [bold]" + signalrPaths[i] + "[/bold].[break]" +
+                    "If hub methods lack authorization, they can be invoked directly.[break]" +
+                    "Test for: unauthorized method calls, information disclosure, privilege escalation.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testDotNetConfig() {
+    var configPaths = [
+        { path: "/web.config", desc: "ASP.NET configuration", sev: 4 },
+        { path: "/Web.config", desc: "ASP.NET configuration", sev: 4 },
+        { path: "/web.config.bak", desc: "config backup", sev: 4 },
+        { path: "/web.config.old", desc: "config backup", sev: 4 },
+        { path: "/appsettings.json", desc: ".NET Core config", sev: 4 },
+        { path: "/appsettings.Development.json", desc: "dev config", sev: 4 },
+        { path: "/appsettings.Production.json", desc: "production config", sev: 4 },
+        { path: "/connectionstrings.config", desc: "connection strings", sev: 4 },
+        { path: "/machine.config", desc: "machine-level config", sev: 4 },
+        { path: "/Global.asax", desc: "application class", sev: 1 },
+        { path: "/Elmah.axd", desc: "ELMAH error log", sev: 3 },
+        { path: "/elmah.axd", desc: "ELMAH error log", sev: 3 },
+        { path: "/Trace.axd", desc: "ASP.NET trace", sev: 3 },
+        { path: "/swagger/", desc: "Swagger/OpenAPI", sev: 2 },
+        { path: "/swagger/v1/swagger.json", desc: "API schema", sev: 2 },
+        { path: "/api-docs", desc: "API documentation", sev: 1 },
+        { path: "/_framework/aspnetcore-browser-refresh.js", desc: ".NET hot reload", sev: 1 },
+        { path: "/health", desc: "health check endpoint", sev: 0 },
+        { path: "/hangfire", desc: "Hangfire dashboard", sev: 3 },
+    ];
+
+    for (var i = 0; i < configPaths.length; i++) {
+        if (configPaths[i].sev == 0) continue;
+
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = configPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var report = false;
+
+            if (configPaths[i].path.indexOf("web.config") != -1 && body.indexOf("<configuration") != -1) report = true;
+            if (configPaths[i].path.indexOf("appsettings") != -1 && body.indexOf("ConnectionStrings") != -1) report = true;
+            if (configPaths[i].path.indexOf("appsettings") != -1 && body.indexOf("Logging") != -1) report = true;
+            if (configPaths[i].path.indexOf("connectionstrings") != -1 && body.indexOf("Data Source") != -1) report = true;
+            if (configPaths[i].path.indexOf("Elmah") != -1 && body.indexOf("error") != -1) report = true;
+            if (configPaths[i].path.indexOf("elmah") != -1 && body.indexOf("error") != -1) report = true;
+            if (configPaths[i].path.indexOf("Trace") != -1 && body.indexOf("Trace") != -1) report = true;
+            if (configPaths[i].path.indexOf("swagger") != -1 && (body.indexOf("swagger") != -1 || body.indexOf("openapi") != -1)) report = true;
+            if (configPaths[i].path.indexOf("hangfire") != -1 && body.indexOf("Hangfire") != -1) report = true;
+            if (configPaths[i].path.indexOf("browser-refresh") != -1) report = true;
+
+            if (report) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = configPaths[i].path;
+                ri.alertPath = "Scripts/ASP.NET";
+                ri.name = "ASP.NET: " + configPaths[i].desc;
+                ri.severity = configPaths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "Sensitive ASP.NET path: [bold]" + configPaths[i].path + "[/bold]";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testExchangeProxyLogon() {
+    // CVE-2021-26855 - ProxyLogon SSRF (Microsoft Exchange)
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/owa/";
+    job.execute();
+
+    if (!job.wasError && (job.response.msg2 == 200 || job.response.msg2 == 302)) {
+        var body = job.response.body;
+        if (body.indexOf("Exchange") != -1 || body.indexOf("OWA") != -1 || body.indexOf("Outlook") != -1) {
+            // test SSRF via autodiscover
+            var job2 = new THTTPJob();
+            job2.url = targetUrl;
+            job2.URI = "/autodiscover/autodiscover.json?@test.com/mapi/nspi/?&Email=autodiscover/autodiscover.json%3f@test.com";
+            job2.execute();
+
+            if (!job2.wasError && job2.response.msg2 != 404) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = "/autodiscover/";
+                ri.alertPath = "Scripts/ASP.NET";
+                ri.name = "Microsoft Exchange Detected - Check ProxyLogon/ProxyShell";
+                ri.severity = 3;
+                ri.setHttpInfo(job2);
+                ri.details = "Microsoft Exchange Server detected (OWA accessible).[break]" +
+                    "Check for:[break]" +
+                    "- CVE-2021-26855 (ProxyLogon SSRF)[break]" +
+                    "- CVE-2021-34473 (ProxyShell)[break]" +
+                    "- CVE-2022-41040/41082 (ProxyNotShell)[break]" +
+                    "- CVE-2023-21529 (Exchange RCE)";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+testViewStateDeserialization();
+testBlazorExposure();
+testSignalR();
+testDotNetConfig();
+testExchangeProxyLogon();

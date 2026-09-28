@@ -1,0 +1,209 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Joomla CMS - Version detection, configuration exposure, known CVEs
+
+function testJoomlaDetection() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return false;
+    var body = job.response.body;
+    return (body.indexOf("Joomla") != -1 || body.indexOf("joomla") != -1 ||
+            body.indexOf("/media/jui/") != -1 || body.indexOf("/components/com_") != -1);
+}
+
+function testJoomlaVersion() {
+    var versionPaths = [
+        "/administrator/manifests/files/joomla.xml",
+        "/language/en-GB/en-GB.xml",
+        "/plugins/system/cache/cache.xml",
+        "/joomla.xml",
+    ];
+
+    for (var i = 0; i < versionPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = versionPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("<version>") != -1) {
+                var match = body.match(/<version>([^<]+)<\/version>/);
+                var version = match ? match[1] : "unknown";
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = versionPaths[i];
+                ri.alertPath = "Scripts/Joomla";
+                ri.name = "Joomla Version Disclosure: " + version;
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = "Joomla version [bold]" + version + "[/bold] detected via [bold]" + versionPaths[i] + "[/bold].[break]" +
+                    "Version disclosure aids in identifying applicable CVEs.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testJoomlaConfig() {
+    var configPaths = [
+        "/configuration.php",
+        "/configuration.php.bak",
+        "/configuration.php.old",
+        "/configuration.php~",
+        "/configuration.php.swp",
+        "/configuration.php.dist",
+        "/configuration.php.save",
+        "/configuration.php.orig",
+        "/.configuration.php.swp",
+        "/configuration.php-dist",
+    ];
+
+    for (var i = 0; i < configPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = configPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("JConfig") != -1 || body.indexOf("$host") != -1 ||
+                body.indexOf("$password") != -1 || body.indexOf("$db") != -1 ||
+                body.indexOf("$secret") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = configPaths[i];
+                ri.alertPath = "Scripts/Joomla";
+                ri.name = "Joomla Configuration File Exposed - Full Credentials";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Joomla configuration file accessible: [bold]" + configPaths[i] + "[/bold].[break]" +
+                    "Contains database host/user/password, secret key, FTP credentials, SMTP settings.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testJoomlaCVEs() {
+    // CVE-2023-23752 - Joomla 4.x REST API unauthorized access
+    var apiPaths = [
+        "/api/index.php/v1/config/application?public=true",
+        "/api/index.php/v1/users?public=true",
+        "/api/index.php/v1/config",
+    ];
+
+    for (var i = 0; i < apiPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = apiPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("attributes") != -1 &&
+                (body.indexOf("dbtype") != -1 || body.indexOf("password") != -1 ||
+                 body.indexOf("username") != -1 || body.indexOf("host") != -1)) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = apiPaths[i];
+                ri.alertPath = "Scripts/Joomla";
+                ri.name = "Joomla 4.x Unauthorized API Access (CVE-2023-23752)";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Joomla REST API leaks application configuration without authentication.[break]" +
+                    "CVE-2023-23752 allows unauthenticated access to config data including database credentials.[break]" +
+                    "Endpoint: [bold]" + apiPaths[i] + "[/bold]";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+
+    // CVE-2015-8562 - Joomla RCE via HTTP User-Agent header (object injection)
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/";
+    job2.request.addHeader("User-Agent", "}__test|O:21:\"JDatabaseDriverMysqli\":0:{}");
+    job2.execute();
+
+    if (!job2.wasError) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("JDatabaseDriver") != -1 || body2.indexOf("unserialize") != -1 ||
+            body2.indexOf("__destruct") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/Joomla";
+            ri.name = "Joomla Object Injection via Session (CVE-2015-8562)";
+            ri.severity = 4;
+            ri.setHttpInfo(job2);
+            ri.details = "Joomla processes serialized objects from User-Agent header in session data.[break]" +
+                "CVE-2015-8562 enables RCE via PHP object injection through HTTP headers.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testJoomlaSensitivePaths() {
+    var paths = [
+        "/administrator/",
+        "/administrator/index.php",
+        "/htaccess.txt",
+        "/web.config.txt",
+        "/README.txt",
+        "/LICENSE.txt",
+        "/tmp/",
+        "/logs/",
+        "/cache/",
+        "/administrator/logs/",
+    ];
+
+    var foundPaths = [];
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (paths[i].indexOf("administrator") != -1 && body.indexOf("Joomla") != -1) {
+                foundPaths.push(paths[i]);
+            }
+            if (paths[i].indexOf("logs") != -1 && body.indexOf("Index of") != -1) {
+                foundPaths.push(paths[i] + " (directory listing)");
+            }
+            if (paths[i].indexOf("htaccess") != -1 && body.indexOf("RewriteEngine") != -1) {
+                foundPaths.push(paths[i]);
+            }
+        }
+    }
+
+    if (foundPaths.length > 0) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = foundPaths[0].split(" ")[0];
+        ri.alertPath = "Scripts/Joomla";
+        ri.name = "Joomla Sensitive Paths Accessible";
+        ri.severity = 1;
+        ri.details = "Accessible Joomla paths:[break]" + foundPaths.join("[break]");
+        AddReportItem(ri);
+    }
+}
+
+if (testJoomlaDetection()) {
+    testJoomlaVersion();
+    testJoomlaConfig();
+    testJoomlaCVEs();
+    testJoomlaSensitivePaths();
+}

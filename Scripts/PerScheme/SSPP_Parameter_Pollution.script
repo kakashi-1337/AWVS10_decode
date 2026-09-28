@@ -1,0 +1,434 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+{ // class for Server-Side Parameter Pollution testing
+    function classSSPP(scheme, inputIndex) {
+        this.scheme = scheme;
+        this.inputIndex = inputIndex;
+        this.variations = scheme.selectVariationsForInput(inputIndex);
+        this.currentVariation = 0;
+        this.foundVulnOnVariation = false;
+        this.lastJob = null;
+        this.baselineBody = "";
+        this.baselineStatus = 0;
+        this.baselineLength = 0;
+    }
+
+    classSSPP.prototype.request = function(value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classSSPP.prototype.requestWithName = function(inputName, value) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setTempInputName(this.inputIndex, inputName);
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classSSPP.prototype.requestRaw = function(path, body, method, contentType) {
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        this.lastJob.URI = path;
+        this.lastJob.verb = method || "POST";
+        this.lastJob.postData = body;
+        this.lastJob.request.addHeader("Content-Type", contentType || "application/json");
+        this.lastJob.execute();
+        return (!this.lastJob.wasError);
+    };
+
+    classSSPP.prototype.requestWithHeaders = function(value, headers) {
+        this.scheme.loadVariation(this.variations.item(this.currentVariation));
+        this.scheme.setInputValue(this.inputIndex, value);
+        this.lastJob = new THTTPJob();
+        this.lastJob.url = targetUrl;
+        scheme.populateRequest(this.lastJob);
+        for (var h = 0; h < headers.length; h++) {
+            this.lastJob.request.addHeader(headers[h].name, headers[h].value);
+        }
+        this.lastJob.execute();
+        return ((!this.lastJob.wasError || (this.lastJob.wasError && this.lastJob.errorCode == 0xF0003)));
+    };
+
+    classSSPP.prototype.alert = function(testValue, details) {
+        this.foundVulnOnVariation = true;
+        var ri = new TReportItem();
+        ri.LoadFromFile("HPP.xml");
+        ri.affects = this.scheme.path;
+        ri.alertPath = "Scripts/SSPP";
+        ri.parameter = this.scheme.getInputName(this.inputIndex);
+        ri.parameterValue = testValue;
+        ri.setHttpInfo(this.lastJob);
+        ri.name = "Server-Side Parameter Pollution";
+        ri.severity = 2;
+        ri.details = details;
+        AddReportItem(ri);
+    };
+
+    classSSPP.prototype.getOrigValue = function() {
+        var value = "";
+        for (var i = 0; i < this.variations.count; i++) {
+            var varValue = this.scheme.getVariation(this.variations.item(i)).item(this.inputIndex);
+            if (value == "" && varValue != "") {
+                value = varValue;
+                break;
+            }
+        }
+        return value;
+    };
+
+    classSSPP.prototype.captureBaseline = function() {
+        var origValue = this.getOrigValue();
+        if (!this.request(origValue)) return false;
+        this.baselineBody = this.lastJob.response.body;
+        this.baselineStatus = this.lastJob.response.msg2;
+        this.baselineLength = this.baselineBody.length;
+        return true;
+    };
+
+    // Normalize body for comparison (remove timestamps, nonces)
+    classSSPP.prototype.normalizeBody = function(body) {
+        body = body.replace(/([0-1]?[0-9]|[2][0-3]):([0-5][0-9])[.|:]([0-9][0-9])/g, "");
+        body = body.replace(/time\s*[:]\s*\d+\.?\d*/g, "");
+        return body;
+    };
+
+    classSSPP.prototype.isBehaviorallyDifferent = function(body, status) {
+        if (status != this.baselineStatus) return true;
+        var normBase = this.normalizeBody(this.baselineBody);
+        var normNew = this.normalizeBody(body);
+        if (normBase == normNew) return false;
+        var lengthDiff = Math.abs(normNew.length - normBase.length);
+        if (lengthDiff > 50 || lengthDiff > (normBase.length * 0.05)) return true;
+        return false;
+    };
+
+    // ---- Duplicate parameter precedence detection ----
+    classSSPP.prototype.testDuplicateParam = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+
+        // Inject: param=origValue&param=injectedValue
+        var canary = "sspp" + randStr(6);
+        var dupValue = origValue + "&" + inputName + "=" + canary;
+        if (!this.request(dupValue)) return false;
+        var dupBody = this.lastJob.response.body;
+        var dupStatus = this.lastJob.response.msg2;
+
+        // Check if the canary value was processed (reflected or caused different behavior)
+        var canaryReflected = (dupBody.indexOf(canary) != -1);
+        var behaviorChanged = this.isBehaviorallyDifferent(dupBody, dupStatus);
+
+        if (!canaryReflected && !behaviorChanged) return false;
+
+        // Confirm: remove the duplicate and behavior should revert
+        if (!this.request(origValue)) return false;
+        var confirmBody = this.lastJob.response.body;
+        var confirmStatus = this.lastJob.response.msg2;
+
+        // Confirm must match baseline
+        if (this.isBehaviorallyDifferent(confirmBody, confirmStatus)) return false;
+
+        // Determine precedence: which value was used?
+        var precedence = "unknown";
+        if (canaryReflected) {
+            precedence = "last";
+            // Test reverse: injectedValue&param=origValue
+            var revValue = canary + "&" + inputName + "=" + origValue;
+            if (this.request(revValue)) {
+                if (this.lastJob.response.body.indexOf(canary) != -1) {
+                    precedence = "first";
+                }
+            }
+        }
+
+        this.alert(dupValue,
+            this.scheme.getInputTypeStr(this.inputIndex) +
+            " input [bold][dark]" + inputName +
+            "[/dark][/bold] accepts duplicate parameters.[break]" +
+            "Original value: [bold]" + origValue + "[/bold] (status " + this.baselineStatus + ").[break]" +
+            "Duplicate injection: [bold]" + dupValue + "[/bold] (status " + dupStatus + ").[break]" +
+            "Parameter precedence: [bold]" + precedence + "[/bold].[break]" +
+            (canaryReflected ? "Canary value [bold]" + canary + "[/bold] was reflected in the response.[break]" : "") +
+            "Server processes duplicate parameters, enabling parameter pollution attacks.");
+        return true;
+    };
+
+    // ---- Nested parameter injection (param[key], param.key) ----
+    classSSPP.prototype.testNestedParams = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+        var canary = "sspp" + randStr(6);
+
+        var nestedPayloads = [
+            { name: inputName + '[nested]', value: canary, desc: 'bracket notation' },
+            { name: inputName + '.nested', value: canary, desc: 'dot notation' },
+            { name: inputName + '[0]', value: canary, desc: 'array index notation' },
+            { name: inputName + '[]', value: canary, desc: 'implicit array notation' }
+        ];
+
+        for (var n = 0; n < nestedPayloads.length; n++) {
+            if (!this.requestWithName(nestedPayloads[n].name, nestedPayloads[n].value)) continue;
+            var nestBody = this.lastJob.response.body;
+            var nestStatus = this.lastJob.response.msg2;
+
+            var reflected = (nestBody.indexOf(canary) != -1);
+            var different = this.isBehaviorallyDifferent(nestBody, nestStatus);
+
+            if (!reflected && !different) continue;
+
+            // Status 500 is a strong signal (type confusion on server)
+            var serverError = (nestStatus == 500);
+
+            // Confirm: normal value restores baseline
+            if (!this.request(origValue)) continue;
+            if (this.isBehaviorallyDifferent(this.lastJob.response.body, this.lastJob.response.msg2)) continue;
+
+            this.alert(nestedPayloads[n].name + '=' + canary,
+                this.scheme.getInputTypeStr(this.inputIndex) +
+                " input [bold][dark]" + inputName +
+                "[/dark][/bold] accepts nested parameter via " + nestedPayloads[n].desc + ".[break]" +
+                "Payload: [bold]" + nestedPayloads[n].name + "=" + canary + "[/bold][break]" +
+                "Response status: [bold]" + nestStatus + "[/bold], body length: " + nestBody.length + " bytes.[break]" +
+                (serverError ? "Server returned HTTP 500, indicating unexpected parameter structure.[break]" : "") +
+                (reflected ? "Injected value was reflected in the response.[break]" : "") +
+                "Baseline status: [bold]" + this.baselineStatus + "[/bold], " + this.baselineLength + " bytes.");
+            return true;
+        }
+
+        return false;
+    };
+
+    // ---- Parameter type confusion ----
+    classSSPP.prototype.testTypeConfusion = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+
+        var typePayloads = [];
+
+        // String to number (if value looks like a string)
+        if (isNaN(parseInt(origValue, 10))) {
+            typePayloads.push({ val: '99999', desc: 'string to number' });
+            typePayloads.push({ val: '0', desc: 'string to zero' });
+            typePayloads.push({ val: 'true', desc: 'string to boolean true' });
+        } else {
+            // Number to string
+            typePayloads.push({ val: 'NaN', desc: 'number to NaN' });
+            typePayloads.push({ val: 'undefined', desc: 'number to undefined' });
+            typePayloads.push({ val: 'null', desc: 'number to null' });
+        }
+
+        // Array injection via bracket
+        typePayloads.push({ val: origValue + '&' + inputName + '=' + origValue, desc: 'parameter to array' });
+
+        for (var t = 0; t < typePayloads.length; t++) {
+            if (!this.request(typePayloads[t].val)) continue;
+            var confBody = this.lastJob.response.body;
+            var confStatus = this.lastJob.response.msg2;
+
+            // Server error on type confusion is meaningful
+            if (confStatus == 500) {
+                // Confirm baseline is not 500
+                if (this.baselineStatus != 500) {
+                    // Second confirmation: another type confusion also errors
+                    var confirmed = false;
+                    for (var t2 = t + 1; t2 < typePayloads.length; t2++) {
+                        if (!this.request(typePayloads[t2].val)) continue;
+                        if (this.lastJob.response.msg2 == 500) {
+                            confirmed = true;
+                            break;
+                        }
+                    }
+
+                    this.alert(typePayloads[t].val,
+                        this.scheme.getInputTypeStr(this.inputIndex) +
+                        " input [bold][dark]" + inputName +
+                        "[/dark][/bold]: type confusion (" + typePayloads[t].desc + ") causes server error.[break]" +
+                        "Value [bold]" + typePayloads[t].val + "[/bold] => status [bold]500[/bold].[break]" +
+                        "Baseline status: [bold]" + this.baselineStatus + "[/bold].[break]" +
+                        (confirmed ? "Confirmed with additional type confusion payload." : "Single type confusion payload triggered error."));
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    };
+
+    // ---- Mass assignment via extra JSON fields ----
+    classSSPP.prototype.testMassAssignment = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+
+        // Build baseline JSON request
+        var baseJSON = '{"' + inputName + '":"' + origValue + '"}';
+        if (!this.requestRaw(this.scheme.path, baseJSON, "POST")) return false;
+        var baseStatus = this.lastJob.response.msg2;
+        var baseBody = this.lastJob.response.body;
+
+        if (baseStatus >= 400 && baseStatus != 422) return false;
+
+        // Try adding privileged fields
+        var massPayloads = [
+            { field: 'role', values: ['"admin"', '"administrator"'], desc: 'role escalation' },
+            { field: 'isAdmin', values: ['true'], desc: 'admin flag' },
+            { field: 'admin', values: ['true', '1'], desc: 'admin property' },
+            { field: 'price', values: ['0', '0.01'], desc: 'price manipulation' },
+            { field: 'discount', values: ['100', '99.99'], desc: 'discount manipulation' },
+            { field: 'verified', values: ['true'], desc: 'verification bypass' },
+            { field: 'active', values: ['true'], desc: 'activation bypass' },
+            { field: 'permissions', values: ['"all"', '["admin"]'], desc: 'permission escalation' }
+        ];
+
+        for (var m = 0; m < massPayloads.length; m++) {
+            for (var mv = 0; mv < massPayloads[m].values.length; mv++) {
+                var injectedJSON = '{"' + inputName + '":"' + origValue + '","' +
+                    massPayloads[m].field + '":' + massPayloads[m].values[mv] + '}';
+
+                if (!this.requestRaw(this.scheme.path, injectedJSON, "POST")) continue;
+                var injStatus = this.lastJob.response.msg2;
+                var injBody = this.lastJob.response.body;
+
+                // Check if the extra field was accepted (not rejected)
+                // A 200/201/302 when baseline was same, but body contains the field or is different
+                if (injStatus >= 200 && injStatus < 400) {
+                    // Check if the injected field name appears in response (echoed back)
+                    var fieldReflected = (injBody.indexOf(massPayloads[m].field) != -1 &&
+                                         baseBody.indexOf(massPayloads[m].field) == -1);
+
+                    if (fieldReflected) {
+                        // Strong signal: field was accepted and reflected
+                        // Confirm: nonsense field should not appear
+                        var nonsenseJSON = '{"' + inputName + '":"' + origValue +
+                            '","sspp_nonexistent_' + randStr(6) + '":"test"}';
+                        if (this.requestRaw(this.scheme.path, nonsenseJSON, "POST")) {
+                            var nonsenseReflected = (this.lastJob.response.body.indexOf('sspp_nonexistent_') != -1);
+                            // If nonsense is also reflected, it is just echoing all fields (less concerning but still report)
+                        }
+
+                        this.alert(injectedJSON,
+                            "Mass assignment: extra field [bold]" + massPayloads[m].field +
+                            "[/bold] accepted in JSON body (" + massPayloads[m].desc + ").[break]" +
+                            "Baseline: [bold]" + baseJSON + "[/bold] => status " + baseStatus + ".[break]" +
+                            "Injected: [bold]" + injectedJSON + "[/bold] => status " + injStatus + ".[break]" +
+                            "The field [bold]" + massPayloads[m].field + "[/bold] was reflected in the response, " +
+                            "indicating the server processed the extra parameter.");
+                        return true;
+                    }
+
+                    // Status changed in a meaningful way
+                    if (injStatus != baseStatus &&
+                        (injStatus == 200 || injStatus == 201 || injStatus == 302)) {
+                        this.alert(injectedJSON,
+                            "Mass assignment: adding field [bold]" + massPayloads[m].field +
+                            "[/bold] changed server behavior (" + massPayloads[m].desc + ").[break]" +
+                            "Baseline: status [bold]" + baseStatus + "[/bold].[break]" +
+                            "Injected: status [bold]" + injStatus + "[/bold].[break]" +
+                            "Status change suggests the extra parameter was processed.");
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    };
+
+    // ---- JSON body parameter injection with __proto__ (different from Prototype_Pollution) ----
+    // Tests for server-side query/filter injection, not prototype chain pollution
+    classSSPP.prototype.testJSONQueryInjection = function() {
+        var inputName = this.scheme.getInputName(this.inputIndex);
+        var origValue = this.getOrigValue();
+        var canary = "ssppq" + randStr(5);
+
+        // Test: inject additional query parameters alongside the real one
+        var baseJSON = '{"' + inputName + '":"' + origValue + '"}';
+        if (!this.requestRaw(this.scheme.path, baseJSON, "POST")) return false;
+        var baseStatus = this.lastJob.response.msg2;
+        var baseBody = this.lastJob.response.body;
+        var baseLength = baseBody.length;
+
+        // Inject a $where clause to test if it is passed to a query engine
+        var whereJSON = '{"' + inputName + '":"' + origValue + '","$where":"this.' + inputName + '==this.' + inputName + '"}';
+        if (!this.requestRaw(this.scheme.path, whereJSON, "POST")) return false;
+        var whereStatus = this.lastJob.response.msg2;
+        var whereBody = this.lastJob.response.body;
+
+        // $where accepted should return same/more data than baseline
+        if (whereStatus == 200 && baseStatus == 200) {
+            var lengthDiff = Math.abs(whereBody.length - baseLength);
+            if (lengthDiff < 50) {
+                // Same response: $where was silently processed (returned same results as tautology)
+                // Confirm with a false $where
+                var whereFalseJSON = '{"' + inputName + '":"' + origValue + '","$where":"this.' + inputName + '!==this.' + inputName + '"}';
+                if (this.requestRaw(this.scheme.path, whereFalseJSON, "POST")) {
+                    var whereFalseBody = this.lastJob.response.body;
+                    var whereFalseStatus = this.lastJob.response.msg2;
+                    var falseLengthDiff = Math.abs(whereFalseBody.length - baseLength);
+                    if (falseLengthDiff > 50 || whereFalseStatus != 200) {
+                        this.alert(whereJSON,
+                            "Server-side query injection via extra JSON parameters.[break]" +
+                            "A [bold]$where[/bold] clause injected alongside [bold]" + inputName + "[/bold] was processed by the query engine.[break]" +
+                            "True condition: status " + whereStatus + ", " + whereBody.length + " bytes.[break]" +
+                            "False condition: status " + whereFalseStatus + ", " + whereFalseBody.length + " bytes.[break]" +
+                            "Baseline: status " + baseStatus + ", " + baseLength + " bytes.");
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // If $where caused an error, that is also a signal
+        if (whereStatus == 500 && baseStatus != 500) {
+            this.alert(whereJSON,
+                "Server-side query injection: [bold]$where[/bold] clause in JSON body triggered server error.[break]" +
+                "Baseline: status [bold]" + baseStatus + "[/bold].[break]" +
+                "With $where: status [bold]500[/bold].[break]" +
+                "The server attempted to process the injected query operator.");
+            return true;
+        }
+
+        return false;
+    };
+
+    classSSPP.prototype.startTesting = function() {
+        for (var v = 0; v < this.variations.count; v++) {
+            if (this.foundVulnOnVariation) break;
+            this.currentVariation = v;
+            this.scheme.loadVariation(this.variations.item(v));
+
+            if (!this.captureBaseline()) continue;
+
+            if (this.testDuplicateParam()) continue;
+            if (this.testNestedParams()) continue;
+            if (this.testTypeConfusion()) continue;
+            if (this.testMassAssignment()) continue;
+            if (this.testJSONQueryInjection()) continue;
+        }
+    };
+}
+
+// main entry point
+for (var i = 0; i < scheme.inputCount; i++) {
+    if (scheme.inputHasFlag(i, INPUT_FLAG_CAN_BE_ARRAY) ||
+        scheme.inputHasFlag(i, INPUT_FLAG_HAS_NAME)) {
+        var tester = new classSSPP(scheme, i);
+        tester.startTesting();
+        ScriptProgress(ComputeProgress(i, scheme.inputCount));
+        tester = null;
+    }
+}

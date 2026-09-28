@@ -1,0 +1,171 @@
+"""
+Local File Inclusion / Directory Traversal module.
+Ported from AWVS10: classDirectoryTraversal.inc, classFileInclusion.inc
+Updated 2018-2025: PHP filter chain RCE, sensitive file discovery,
+proc/K8s/cloud cred paths, SSH key detection.
+"""
+import re
+import base64
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+from .base import BaseModule
+from ..core.reporter import Finding
+from ..payloads.traversal import (
+    UNIX_TRAVERSAL,
+    WINDOWS_TRAVERSAL,
+    PHP_WRAPPERS,
+    PHP_FILTER_CHAIN_RCE,
+    JAVA_TRAVERSAL,
+    ALL_SENSITIVE_FILES,
+    detect_traversal_success,
+    detect_include_error,
+    detect_sensitive_file,
+)
+
+
+class LFIModule(BaseModule):
+    name = "lfi"
+    description = "Local File Inclusion / Directory Traversal"
+
+    def run(self, url: str, params: dict = None):
+        self.log(f"Testing: {url}")
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+
+        if params:
+            query_params.update({k: [v] for k, v in params.items()})
+
+        if not query_params:
+            self._test_sensitive_files(url, parsed)
+            return
+
+        for param_name in query_params:
+            original_value = query_params[param_name][0]
+            self.log(f"Testing param: {param_name}")
+
+            baseline = self.http.get(url)
+            if not baseline:
+                continue
+            baseline_body = baseline.content.decode('utf-8', errors='replace')
+
+            baseline_has_error, _ = detect_include_error(baseline_body)
+
+            for payload_list, os_type in [
+                (UNIX_TRAVERSAL, "unix"),
+                (WINDOWS_TRAVERSAL, "windows"),
+                (JAVA_TRAVERSAL, "java"),
+            ]:
+                for payload in payload_list:
+                    test_url = self._build_url(parsed, query_params, param_name, payload)
+                    resp = self.http.get(test_url)
+                    if not resp:
+                        continue
+                    resp_body = resp.content.decode('utf-8', errors='replace')
+
+                    found, evidence = detect_traversal_success(resp_body)
+                    if found:
+                        self.reporter.add(Finding(
+                            vuln_type="Directory Traversal / LFI",
+                            severity="HIGH",
+                            url=url,
+                            parameter=param_name,
+                            payload=payload,
+                            evidence=evidence,
+                            details=f"OS target: {os_type}",
+                        ))
+                        return
+
+            for payload in PHP_WRAPPERS:
+                test_url = self._build_url(parsed, query_params, param_name, payload)
+                resp = self.http.get(test_url)
+                if not resp:
+                    continue
+                resp_body = resp.content.decode('utf-8', errors='replace')
+
+                if "php://filter" in payload and "convert.base64" in payload:
+                    b64_match = re.search(r"[A-Za-z0-9+/]{40,}={0,2}", resp_body)
+                    if b64_match:
+                        try:
+                            decoded = base64.b64decode(b64_match.group(0)).decode("utf-8", errors="ignore")
+                            if "<?php" in decoded or "<?" in decoded:
+                                self.reporter.add(Finding(
+                                    vuln_type="Local File Inclusion (PHP filter)",
+                                    severity="HIGH",
+                                    url=url,
+                                    parameter=param_name,
+                                    payload=payload,
+                                    evidence=f"Base64 decoded PHP source ({len(decoded)} bytes)",
+                                    details="php://filter wrapper successfully read source code",
+                                ))
+                                return
+                        except Exception:
+                            pass
+
+                found, evidence = detect_include_error(resp_body)
+                if found and not baseline_has_error:
+                    self.reporter.add(Finding(
+                        vuln_type="Local File Inclusion (PHP include error)",
+                        severity="MEDIUM",
+                        url=url,
+                        parameter=param_name,
+                        payload=payload,
+                        evidence=evidence,
+                        details="PHP include/require error triggered, may lead to RCE via log poisoning or wrappers",
+                    ))
+                    return
+
+            self._test_php_filter_chain(url, parsed, query_params, param_name)
+
+        self._test_sensitive_files(url, parsed)
+
+    def _test_php_filter_chain(self, url, parsed, query_params, param_name):
+        for payload in PHP_FILTER_CHAIN_RCE:
+            test_url = self._build_url(parsed, query_params, param_name, payload)
+            resp = self.http.get(test_url)
+            if not resp:
+                continue
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if resp.status_code == 200 and len(resp_body) > 0:
+                if "<?php" in resp_body or "PD9waH" in resp_body:
+                    self.reporter.add(Finding(
+                        vuln_type="LFI to RCE (PHP filter chain)",
+                        severity="CRITICAL",
+                        url=url,
+                        parameter=param_name,
+                        payload=payload[:80] + "...",
+                        evidence="PHP filter chain iconv technique produced output",
+                        details="Synacktiv 2022 technique. Full RCE achievable via crafted filter chain.",
+                    ))
+                    return
+
+    def _test_sensitive_files(self, url, parsed):
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        baseline = self.http.get(url)
+        baseline_length = len(baseline.content.decode('utf-8', errors='replace')) if baseline else 0
+        baseline_404 = self.http.get(f"{base_url}/genki_nonexistent_path_test")
+        baseline_404_body = baseline_404.content.decode('utf-8', errors='replace') if baseline_404 else ""
+
+        for path in ALL_SENSITIVE_FILES:
+            test_url = f"{base_url}{path}"
+            resp = self.http.get(test_url)
+            if not resp or resp.status_code not in (200, 403):
+                continue
+
+            resp_body = resp.content.decode('utf-8', errors='replace')
+            if resp.status_code == 200 and resp_body and resp_body != baseline_404_body:
+                found, evidence = detect_sensitive_file(resp_body, path)
+                if found:
+                    self.reporter.add(Finding(
+                        vuln_type="Sensitive File Exposure",
+                        severity="HIGH" if any(k in path for k in [".env", "credentials", "id_rsa", "token", "secret", "heapdump"]) else "MEDIUM",
+                        url=test_url,
+                        payload=path,
+                        evidence=evidence,
+                        details=f"Sensitive file accessible at {path}",
+                    ))
+
+    def _build_url(self, parsed, query_params, param_name, payload):
+        modified = dict(query_params)
+        modified[param_name] = [payload]
+        query_string = urlencode({k: v[0] for k, v in modified.items()})
+        return urlunparse(parsed._replace(query=query_string))

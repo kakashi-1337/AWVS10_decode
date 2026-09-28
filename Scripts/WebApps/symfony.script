@@ -53,4 +53,4 @@ if (!alreadyReportedWebApplication)
     setGlobalValue("detectedAppSymfony", 1, true);           
     KBase("Symfony web application", "Symfony web application was detected in directory [dark][bold]" + dir.fullPath + "[/bold][/dark].");
 }
-checkVersion(dir, dir.fullPath);
+checkVersion(dir.fullPath);

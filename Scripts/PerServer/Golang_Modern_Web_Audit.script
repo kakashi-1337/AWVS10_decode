@@ -1,0 +1,336 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Go/Rust/Modern web server audit - Gin, Echo, Fiber, Chi, Actix, Axum
+
+function isModernTarget() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return false;
+    var headers = job.response;
+
+    // Go signatures
+    if (headers.headerValue("server").indexOf("Go") != -1) return true;
+    if (headers.headerValue("server").indexOf("Caddy") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Fiber") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Echo") != -1) return true;
+    if (headers.headerValue("x-powered-by").indexOf("Gin") != -1) return true;
+
+    // Rust signatures
+    if (headers.headerValue("server").indexOf("actix") != -1) return true;
+    if (headers.headerValue("server").indexOf("Actix") != -1) return true;
+    if (headers.headerValue("server").indexOf("axum") != -1) return true;
+    if (headers.headerValue("server").indexOf("warp") != -1) return true;
+    if (headers.headerValue("server").indexOf("hyper") != -1) return true;
+    if (headers.headerValue("server").indexOf("rocket") != -1) return true;
+
+    // Go error page signatures
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/nonexistent_genki_" + Math.random().toString(36).substring(7);
+    job2.execute();
+    if (!job2.wasError) {
+        var errBody = job2.response.body;
+        if (errBody == "404 page not found\n" || errBody == "404 page not found") return true;
+        if (errBody.indexOf("gin-gonic") != -1) return true;
+        if (errBody.indexOf("echo") != -1 && errBody.indexOf("\"message\"") != -1) return true;
+        if (errBody == "{\"message\":\"Not Found\"}\n") return true;
+    }
+    return false;
+}
+
+function testPprofExposure() {
+    var pprofPaths = [
+        { path: "/debug/pprof/", marker: "Types of profiles available", name: "pprof index" },
+        { path: "/debug/pprof/goroutine?debug=1", marker: "goroutine", name: "goroutine dump" },
+        { path: "/debug/pprof/heap?debug=1", marker: "heap", name: "heap profile" },
+        { path: "/debug/pprof/trace", marker: null, name: "execution trace" },
+        { path: "/debug/pprof/cmdline", marker: null, name: "command line" },
+        { path: "/debug/vars", marker: "cmdline", name: "expvar" },
+        { path: "/debug/requests", marker: "Trace", name: "request trace" },
+        { path: "/debug/events", marker: "Family", name: "event log" },
+    ];
+
+    for (var i = 0; i < pprofPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = pprofPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isProfile = false;
+
+            if (pprofPaths[i].marker) {
+                isProfile = body.indexOf(pprofPaths[i].marker) != -1;
+            } else {
+                isProfile = body.length > 50 && body.indexOf("404") == -1;
+            }
+
+            if (isProfile) {
+                var sev = 3;
+                if (pprofPaths[i].path.indexOf("goroutine") != -1 || pprofPaths[i].path.indexOf("heap") != -1) sev = 3;
+                if (pprofPaths[i].path.indexOf("cmdline") != -1) sev = 2;
+                if (pprofPaths[i].path.indexOf("trace") != -1) sev = 3;
+                if (pprofPaths[i].path.indexOf("vars") != -1) sev = 3;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = pprofPaths[i].path;
+                ri.alertPath = "Scripts/Golang";
+                ri.name = "Go Debug Profiling Exposed (" + pprofPaths[i].name + ")";
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = "Go runtime profiling endpoint accessible at [bold]" + pprofPaths[i].path + "[/bold].[break]" +
+                    "Exposes goroutine stacks, memory allocation, command line args, and runtime internals.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testGoHealthMetrics() {
+    var paths = [
+        { path: "/metrics", marker: "go_", desc: "Prometheus metrics" },
+        { path: "/healthz", marker: "ok", desc: "K8s health" },
+        { path: "/readyz", marker: "ok", desc: "K8s readiness" },
+        { path: "/livez", marker: "ok", desc: "K8s liveness" },
+        { path: "/health", marker: "status", desc: "health check" },
+        { path: "/-/healthy", marker: "Healthy", desc: "Grafana-style health" },
+        { path: "/-/ready", marker: "Ready", desc: "Grafana-style ready" },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(paths[i].marker) != -1) {
+                var sev = 1;
+                // Prometheus metrics with go_ prefix expose runtime details
+                if (paths[i].path == "/metrics" && body.indexOf("go_") != -1) {
+                    sev = 2;
+                    var hasSecrets = body.indexOf("password") != -1 || body.indexOf("token") != -1 ||
+                                    body.indexOf("secret") != -1 || body.indexOf("key=") != -1;
+                    if (hasSecrets) sev = 3;
+                }
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/Golang";
+                ri.name = "Infrastructure Endpoint Exposed: " + paths[i].desc;
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = paths[i].desc + " accessible at [bold]" + paths[i].path + "[/bold]." +
+                    (sev >= 2 ? "[break]Exposes Go runtime version, goroutine count, memory stats, and possibly custom metrics." : "");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testGinDebugRoutes() {
+    // Gin framework prints routes in debug mode
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    // check for Gin debug mode via error response
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/nonexistent_genki_test";
+    job2.execute();
+    if (!job2.wasError && job2.response.body.indexOf("gin-gonic") != -1) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = "/";
+        ri.alertPath = "Scripts/Golang";
+        ri.name = "Gin Framework Debug Mode Detected";
+        ri.severity = 1;
+        ri.setHttpInfo(job2);
+        ri.details = "Gin framework running in debug mode.[break]" +
+            "Debug mode logs all registered routes to stderr and enables verbose error output.";
+        AddReportItem(ri);
+    }
+}
+
+function testEtcdExposure() {
+    // etcd is Go-based and often accidentally exposed
+    var paths = [
+        { path: "/v2/keys/", marker: "nodes", sev: 4 },
+        { path: "/v2/members", marker: "members", sev: 3 },
+        { path: "/version", marker: "etcdserver", sev: 2 },
+        { path: "/v3/kv/range", marker: null, sev: 4 },
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = paths[i].path;
+        if (paths[i].path == "/v3/kv/range") {
+            job.verb = "POST";
+            job.request.addHeader("Content-Type", "application/json");
+            job.postData = '{"key":"AA==","range_end":"//8=","limit":"5"}';
+        }
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isEtcd = false;
+            if (paths[i].marker) {
+                isEtcd = body.indexOf(paths[i].marker) != -1;
+            } else {
+                isEtcd = body.indexOf("kvs") != -1 || body.indexOf("count") != -1;
+            }
+
+            if (isEtcd) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = paths[i].path;
+                ri.alertPath = "Scripts/Golang";
+                ri.name = "etcd Key-Value Store Exposed";
+                ri.severity = paths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "etcd endpoint accessible at [bold]" + paths[i].path + "[/bold].[break]" +
+                    "Unauthenticated access to K8s/service secrets, configs, and cluster state.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testConsulVault() {
+    // HashiCorp Consul/Vault - Go services
+    var consulPaths = [
+        { path: "/v1/agent/self", marker: "Config", name: "Consul Agent", sev: 3 },
+        { path: "/v1/catalog/services", marker: "{", name: "Consul Services", sev: 2 },
+        { path: "/v1/kv/?recurse", marker: "Key", name: "Consul KV Store", sev: 4 },
+        { path: "/v1/agent/members", marker: "Name", name: "Consul Members", sev: 2 },
+    ];
+    var vaultPaths = [
+        { path: "/v1/sys/health", marker: "initialized", name: "Vault Health", sev: 2 },
+        { path: "/v1/sys/seal-status", marker: "sealed", name: "Vault Seal Status", sev: 2 },
+        { path: "/v1/sys/mounts", marker: "secret", name: "Vault Mounts", sev: 3 },
+    ];
+
+    var allPaths = consulPaths.concat(vaultPaths);
+    for (var i = 0; i < allPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = allPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(allPaths[i].marker) != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = allPaths[i].path;
+                ri.alertPath = "Scripts/Golang";
+                ri.name = allPaths[i].name + " Endpoint Exposed";
+                ri.severity = allPaths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = allPaths[i].name + " accessible at [bold]" + allPaths[i].path + "[/bold].[break]" +
+                    "May expose service topology, configuration, secrets, or cluster membership.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testK8sDashboard() {
+    var k8sPaths = [
+        { path: "/api/v1/namespaces", marker: "items", name: "K8s API namespaces", sev: 4 },
+        { path: "/api/v1/pods", marker: "items", name: "K8s API pods", sev: 4 },
+        { path: "/api/v1/secrets", marker: "items", name: "K8s API secrets", sev: 4 },
+        { path: "/apis", marker: "groups", name: "K8s API groups", sev: 3 },
+        { path: "/version", marker: "gitVersion", name: "K8s version", sev: 1 },
+    ];
+
+    for (var i = 0; i < k8sPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = k8sPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(k8sPaths[i].marker) != -1) {
+                var isK8s = body.indexOf("kubernetes") != -1 || body.indexOf("apiVersion") != -1 ||
+                            body.indexOf("kind") != -1 || body.indexOf("gitVersion") != -1;
+                if (isK8s) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = k8sPaths[i].path;
+                    ri.alertPath = "Scripts/Golang";
+                    ri.name = k8sPaths[i].name + " Exposed";
+                    ri.severity = k8sPaths[i].sev;
+                    ri.setHttpInfo(job);
+                    ri.details = "Kubernetes " + k8sPaths[i].name + " accessible at [bold]" + k8sPaths[i].path + "[/bold].[break]" +
+                        "Unauthenticated K8s API access. Can enumerate pods, secrets, namespaces.";
+                    AddReportItem(ri);
+                }
+            }
+        }
+    }
+}
+
+function testCloudMetadata() {
+    // SSRF to cloud metadata - works if target is a reverse proxy
+    var metadataPaths = [
+        { path: "/latest/meta-data/", host: "169.254.169.254", marker: "ami-id", name: "AWS EC2 Metadata" },
+        { path: "/computeMetadata/v1/", host: "metadata.google.internal", marker: "attributes", name: "GCP Metadata" },
+        { path: "/metadata/instance?api-version=2021-02-01", host: "169.254.169.254", marker: "compute", name: "Azure Metadata" },
+    ];
+
+    for (var i = 0; i < metadataPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = metadataPaths[i].path;
+        job.request.addHeader("Host", metadataPaths[i].host);
+        if (metadataPaths[i].name.indexOf("GCP") != -1) {
+            job.request.addHeader("Metadata-Flavor", "Google");
+        }
+        if (metadataPaths[i].name.indexOf("Azure") != -1) {
+            job.request.addHeader("Metadata", "true");
+        }
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(metadataPaths[i].marker) != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = metadataPaths[i].path;
+                ri.alertPath = "Scripts/Golang";
+                ri.name = metadataPaths[i].name + " via Host Header SSRF";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Cloud instance metadata accessible via Host header manipulation.[break]" +
+                    "Can leak IAM credentials, instance identity, and cloud configuration.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+if (isModernTarget()) {
+    testPprofExposure();
+    testGoHealthMetrics();
+    testGinDebugRoutes();
+    testEtcdExposure();
+    testConsulVault();
+    testK8sDashboard();
+    testCloudMetadata();
+}

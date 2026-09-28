@@ -1,0 +1,1347 @@
+{
+  "version": "1.6.3",
+  "lastUpdated": "2026-07-13T23:57:08.343Z",
+  "totalPatterns": 56,
+  "totalDetections": 0,
+  "patterns": {
+    "obfuscators": {
+      "obfuscator.io": {
+        "signatures": [
+          {
+            "pattern": "_0x[a-f0-9]{4,}",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "var _0x\\w+=\\[",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\['push'\\]\\(\\w+\\['shift'\\]",
+            "weight": 0.95,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.99,
+        "detectionCount": 87,
+        "successRate": 0.97,
+        "handler": "obfuscator_io",
+        "successCount": 84
+      },
+      "jscrambler": {
+        "signatures": [
+          {
+            "pattern": "\\\\)\\\\s*[~:`\\\\)|\\\\xAA]",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\\\.f\\\\s*=\\\\s*\\\\(function",
+            "weight": 0.95,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\\\[189638\\\\]",
+            "weight": 0.99,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\b\\w+\\.f\\s*=\\s*\\(function",
+            "weight": 0.55,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\[189638\\]|\\[0x2e526\\]",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "location\\s*(\\.|\\[)\\s*[\\x27\"]?(hostname|host|href)",
+            "weight": 0.3,
+            "type": "regex"
+          },
+          {
+            "pattern": "navigator\\s*(\\.|\\[)\\s*[\\x27\"]?(userAgent|platform)",
+            "weight": 0.3,
+            "type": "regex"
+          }
+        ],
+        "knownKeys": [
+          "YN3ZHE",
+          "28K&IL",
+          "4PJ#3("
+        ],
+        "knownDelimiters": [
+          "~",
+          ":",
+          "`",
+          ")",
+          "|",
+          "ª"
+        ],
+        "confidence": 0.16,
+        "detectionCount": 8,
+        "successRate": 1,
+        "handler": "jscrambler",
+        "successCount": 8
+      },
+      "javascript-obfuscator": {
+        "signatures": [
+          {
+            "pattern": "_0x[a-f0-9]{4}\\(",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "rotateStringArray",
+            "weight": 0.95,
+            "type": "literal"
+          },
+          {
+            "pattern": "stringArrayThreshold",
+            "weight": 0.95,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "obfuscator_io"
+      },
+      "defendjs": {
+        "signatures": [
+          {
+            "pattern": "_defendjs_",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "defendjs",
+            "weight": 0.95,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "defendjs"
+      },
+      "uglifyjs": {
+        "signatures": [
+          {
+            "pattern": "!function\\(",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "void 0",
+            "weight": 0.4,
+            "type": "literal"
+          },
+          {
+            "pattern": "\\w=\\w\\|\\|\\{\\}",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "beautify"
+      },
+      "terser": {
+        "signatures": [
+          {
+            "pattern": "=>\\{",
+            "weight": 0.3,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\w\\?\\w:void 0",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "beautify"
+      },
+      "closure-compiler": {
+        "signatures": [
+          {
+            "pattern": "\\$jscomp",
+            "weight": 0.95,
+            "type": "literal"
+          },
+          {
+            "pattern": "goog\\.",
+            "weight": 0.9,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "beautify"
+      },
+      "packer": {
+        "signatures": [
+          {
+            "pattern": "function\\s*\\(\\s*p\\s*,\\s*a\\s*,\\s*c\\s*,\\s*k\\s*,\\s*e\\s*,\\s*[dr]\\s*\\)",
+            "weight": 0.92,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\.split\\('\\|'\\)",
+            "weight": 0.4,
+            "type": "regex"
+          },
+          {
+            "pattern": "eval\\(function\\(",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.92,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "packer"
+      },
+      "js_confuser": {
+        "signatures": [
+          {
+            "pattern": "Function\\s*\\(\\s*[\"\\x27][A-Za-z0-9_$]{3,}[\"\\x27]\\s*,\\s*[\"\\x27]var\\s",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "0x9e3779b9|0x6a09e667|0x243f6a88",
+            "weight": 0.7,
+            "type": "regex"
+          },
+          {
+            "pattern": "__proto__[\\s\\S]{0,40}charCodeAt",
+            "weight": 0.3,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.9,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "jsconfuser"
+      }
+    },
+    "bundlers": {
+      "webpack": {
+        "signatures": [
+          {
+            "pattern": "__webpack_require__",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "webpackJsonp",
+            "weight": 0.95,
+            "type": "literal"
+          },
+          {
+            "pattern": "__webpack_modules__",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "installedModules",
+            "weight": 0.7,
+            "type": "literal"
+          }
+        ],
+        "versions": {
+          "webpack5": [
+            "__webpack_module_cache__",
+            "__webpack_exports__"
+          ],
+          "webpack4": [
+            "webpackJsonpCallback",
+            "installedChunks"
+          ],
+          "webpack3": [
+            "webpackJsonp",
+            "modules"
+          ]
+        },
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "webpack"
+      },
+      "rollup": {
+        "signatures": [
+          {
+            "pattern": "\\(function\\s*\\(\\s*exports\\s*,",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "Object\\.defineProperty\\(exports",
+            "weight": 0.7,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "rollup"
+      },
+      "parcel": {
+        "signatures": [
+          {
+            "pattern": "parcelRequire",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "__parcel__",
+            "weight": 0.95,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "parcel"
+      },
+      "browserify": {
+        "signatures": [
+          {
+            "pattern": "require=function.*_prelude",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "require\\(\\d+\\)",
+            "weight": 0.7,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "browserify"
+      },
+      "esbuild": {
+        "signatures": [
+          {
+            "pattern": "__esm\\(",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "__commonJS\\(",
+            "weight": 0.9,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "esbuild"
+      },
+      "vite": {
+        "signatures": [
+          {
+            "pattern": "__vite__",
+            "weight": 0.95,
+            "type": "literal"
+          },
+          {
+            "pattern": "import\\.meta\\.hot",
+            "weight": 0.8,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "vite"
+      }
+    },
+    "encodings": {
+      "jsfuck": {
+        "signatures": [
+          {
+            "pattern": "^[\\[\\]\\(\\)!+\\s]{50,}$",
+            "weight": 0.99,
+            "type": "regex",
+            "multiline": true
+          },
+          {
+            "pattern": "\\[\\]\\[\\[\\]\\]",
+            "weight": 0.9,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\(!\\!\\[\\]\\+\\[\\]\\)",
+            "weight": 0.95,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "esoteric"
+      },
+      "jjencode": {
+        "signatures": [
+          {
+            "pattern": "\\$=~\\[\\];",
+            "weight": 0.99,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\$\\.\\$\\(\\$\\.\\$",
+            "weight": 0.95,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "esoteric"
+      },
+      "aaencode": {
+        "signatures": [
+          {
+            "pattern": "ﾟωﾟ",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "ﾟΘﾟ",
+            "weight": 0.95,
+            "type": "literal"
+          },
+          {
+            "pattern": "ﾟДﾟ",
+            "weight": 0.95,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "esoteric"
+      },
+      "base64": {
+        "signatures": [
+          {
+            "pattern": "atob\\s*\\(",
+            "weight": 0.7,
+            "type": "regex"
+          },
+          {
+            "pattern": "btoa\\s*\\(",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "Buffer\\.from\\([^,]+,\\s*['\"]base64['\"]\\)",
+            "weight": 0.8,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "string"
+      },
+      "hex": {
+        "signatures": [
+          {
+            "pattern": "\\\\x[0-9a-fA-F]{2}",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "string"
+      },
+      "unicode": {
+        "signatures": [
+          {
+            "pattern": "\\\\u[0-9a-fA-F]{4}",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\\\u\\{[0-9a-fA-F]+\\}",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "string"
+      },
+      "xor": {
+        "signatures": [
+          {
+            "pattern": "charCodeAt\\([^)]*\\)\\s*\\^",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "String\\.fromCharCode\\([^)]*\\^",
+            "weight": 0.85,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "crypto"
+      },
+      "rc4": {
+        "signatures": [
+          {
+            "pattern": "rc4",
+            "weight": 0.9,
+            "type": "literal",
+            "caseSensitive": false
+          },
+          {
+            "pattern": "%\\s*256",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "crypto"
+      },
+      "octal_escape": {
+        "signatures": [
+          {
+            "pattern": "\\\\[0-3][0-7]{2}",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.5,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "unicode_codepoint": {
+        "signatures": [
+          {
+            "pattern": "\\\\u\\{[0-9a-fA-F]+\\}",
+            "weight": 0.8,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.8,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "fromcharcode": {
+        "signatures": [
+          {
+            "pattern": "String\\.fromCharCode\\s*\\(",
+            "weight": 0.7,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.7,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "base32": {
+        "signatures": [
+          {
+            "pattern": "[\"'][A-Z2-7]{24,}={0,6}[\"']",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.4,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "ascii85": {
+        "signatures": [
+          {
+            "pattern": "<~[\\s\\S]{8,}~>",
+            "weight": 0.7,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.7,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "percent_url": {
+        "signatures": [
+          {
+            "pattern": "(unescape|decodeURIComponent)\\s*\\([\\s\\S]{0,40}%[0-9a-fA-F]{2}",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "binary_literal": {
+        "signatures": [
+          {
+            "pattern": "\\b0b[01]{4,}\\b",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.4,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "encoding"
+      },
+      "eval_unescape": {
+        "signatures": [
+          {
+            "pattern": "eval\\s*\\(\\s*unescape\\s*\\(",
+            "weight": 0.8,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.8,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "packer"
+      }
+    },
+    "sourcemaps": {
+      "inline-comment": {
+        "signatures": [
+          {
+            "pattern": "//[#@]\\s*sourceMappingURL=",
+            "weight": 0.99,
+            "type": "regex"
+          },
+          {
+            "pattern": "/\\*[#@]\\s*sourceMappingURL=",
+            "weight": 0.99,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0
+      },
+      "inline-base64": {
+        "signatures": [
+          {
+            "pattern": "sourceMappingURL=data:application/json;base64,",
+            "weight": 0.99,
+            "type": "literal"
+          },
+          {
+            "pattern": "sourceMappingURL=data:[^;]+;base64,",
+            "weight": 0.95,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0
+      },
+      "external-file": {
+        "signatures": [
+          {
+            "pattern": "sourceMappingURL=[^\\s]+\\.map",
+            "weight": 0.95,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\.js\\.map",
+            "weight": 0.7,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0
+      },
+      "hidden-chunk": {
+        "signatures": [
+          {
+            "pattern": "\"sources\"\\s*:\\s*\\[",
+            "weight": 0.7,
+            "type": "regex"
+          },
+          {
+            "pattern": "\"mappings\"\\s*:\\s*\"",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "\"sourcesContent\"\\s*:",
+            "weight": 0.9,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0
+      },
+      "webpack-devtool": {
+        "signatures": [
+          {
+            "pattern": "webpack:///src/",
+            "weight": 0.9,
+            "type": "literal"
+          },
+          {
+            "pattern": "webpack:///",
+            "weight": 0.7,
+            "type": "literal"
+          },
+          {
+            "pattern": "sourceURL=webpack",
+            "weight": 0.85,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0
+      }
+    },
+    "anti_debug": {
+      "debugger-trap": {
+        "signatures": [
+          {
+            "pattern": "\\bdebugger\\b",
+            "weight": 0.99,
+            "type": "regex"
+          },
+          {
+            "pattern": "setInterval.*debugger",
+            "weight": 0.95,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "anti_debug"
+      },
+      "timing-check": {
+        "signatures": [
+          {
+            "pattern": "performance\\.now\\(",
+            "weight": 0.7,
+            "type": "regex"
+          },
+          {
+            "pattern": "Date\\.now\\(",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "anti_debug"
+      },
+      "devtools-detect": {
+        "signatures": [
+          {
+            "pattern": "outerWidth.*innerWidth",
+            "weight": 0.8,
+            "type": "regex"
+          },
+          {
+            "pattern": "__REACT_DEVTOOLS",
+            "weight": 0.9,
+            "type": "literal"
+          },
+          {
+            "pattern": "Firebug",
+            "weight": 0.85,
+            "type": "literal"
+          }
+        ],
+        "confidence": 0,
+        "detectionCount": 0,
+        "handler": "anti_debug"
+      },
+      "integrity_selfcheck": {
+        "signatures": [
+          {
+            "pattern": "toString\\s*\\(\\s*\\)\\s*[\\s\\S]{0,30}(search|test|replace|match)",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "(RegExp|\\/[^\\n]{1,40}\\/)[\\s\\S]{0,30}\\.test\\s*\\(",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "trap:integrity"
+      },
+      "interval_trap": {
+        "signatures": [
+          {
+            "pattern": "setInterval\\s*\\([^,]{1,40},\\s*\\d{1,4}\\s*\\)[\\s\\S]{0,200}(debugger|toString)",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "trap:interval"
+      },
+      "env_keying": {
+        "signatures": [
+          {
+            "pattern": "(location|navigator|document\\.domain)[\\s\\S]{0,80}(atob|charCodeAt|fromCharCode|\\^)",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "trap:env_keying"
+      },
+      "console_tamper": {
+        "signatures": [
+          {
+            "pattern": "console\\s*\\[\\s*['\"][^'\"]+['\"]\\s*\\]\\s*=|console\\.\\w+\\s*=\\s*function",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.4,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "trap:console"
+      }
+    },
+    "custom": {},
+    "virtualization": {
+      "cff_dispatcher": {
+        "signatures": [
+          {
+            "pattern": "switch\\s*\\(\\s*\\w+\\[\\s*\\w+(\\+\\+|--)?\\s*\\]\\s*\\)",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "while\\s*\\(\\s*!!\\[\\]\\s*\\)\\s*\\{\\s*switch",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "\"\\d+\\|\\d+(\\|\\d+)+\"\\.split\\(",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "virtualized"
+      },
+      "bytecode_array": {
+        "signatures": [
+          {
+            "pattern": "\\[(?:\\s*-?\\d+\\s*,){40,}",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "virtualized"
+      },
+      "vm_interpreter": {
+        "signatures": [
+          {
+            "pattern": "for\\s*\\(;;\\)",
+            "weight": 0.3,
+            "type": "regex"
+          },
+          {
+            "pattern": "while\\s*\\(\\s*(?:true|1|!!\\[\\])\\s*\\)[\\s\\S]{0,80}switch",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.5,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "virtualized"
+      },
+      "stack_machine": {
+        "signatures": [
+          {
+            "pattern": "\\.pop\\(\\)[\\s\\S]{0,40}\\.push\\(",
+            "weight": 0.3,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\bstack\\[",
+            "weight": 0.2,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.4,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "virtualized"
+      }
+    },
+    "malware": {
+      "jsfiretruck": {
+        "signatures": [
+          {
+            "pattern": "^[\\s]*[\\[\\]()!+]{300,}",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "document\\[[\\s\\S]{0,30}referrer",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.7,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:jsfiretruck",
+        "note": "Unit42: 269k pages Mar-Apr 2025"
+      },
+      "socgholish_ndsw": {
+        "signatures": [
+          {
+            "pattern": "\\bif\\s*\\(\\s*ndsw\\s*===?\\s*undefined\\s*\\)",
+            "weight": 0.85,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\bndsw\\b|\\bndsx\\b",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "khutmhpx",
+            "weight": 0.8,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.85,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:socgholish",
+        "note": "NDSW/NDSX injection; Sucuri: 110k+ sites 2023"
+      },
+      "magecart_hexstring": {
+        "signatures": [
+          {
+            "pattern": "_0x[0-9a-f]{4,}[\\s\\S]{0,40}(XMLHttpRequest|FormData|fetch\\()",
+            "weight": 0.5,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.5,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:skimmer"
+      },
+      "dynamic_exec_sink": {
+        "signatures": [
+          {
+            "pattern": "document\\.write\\s*\\([\\s\\S]{0,40}(atob|unescape|fromCharCode)",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:dropper"
+      },
+      "magecart_skimmer": {
+        "signatures": [
+          {
+            "pattern": "(removeCookie|cookieName)[\\s\\S]{0,60}(toString|constructor)",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "_0x[0-9a-f]{4,}[\\s\\S]{0,60}(XMLHttpRequest|FormData|new\\s+Image)",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "(dtoa|atob)\\s*\\([\\s\\S]{0,40}(shift|rotate|split)",
+            "weight": 0.4,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.5,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:skimmer",
+        "note": "RiskIQ/CloudSEK: hex array + rotate + b64 exfil"
+      },
+      "gootloader": {
+        "signatures": [
+          {
+            "pattern": "jQuery\\s+v?3\\.0\\.0|jquery-3\\.0\\.0",
+            "weight": 0.4,
+            "type": "regex"
+          },
+          {
+            "pattern": "for\\s*\\([^)]*length[\\s\\S]{0,40}--[\\s\\S]{0,80}(charAt|substr|\\[)",
+            "weight": 0.3,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.4,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:gootloader",
+        "note": "Huntress: jQuery masquerade + backward-loop reassembly"
+      },
+      "mintsloader_dga": {
+        "signatures": [
+          {
+            "pattern": "Fattura[0-9]{6,8}\\.js",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "(System\\.Random|Math\\.random)[\\s\\S]{0,80}['\"]abcdefghijklmn",
+            "weight": 0.5,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\.top['\"]|\\+\\s*['\"]\\.top",
+            "weight": 0.2,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.5,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:dga",
+        "note": "eSentire: date-seeded DGA, 15 iters, .top TLD"
+      },
+      "wscript_dropper": {
+        "signatures": [
+          {
+            "pattern": "WScript\\.(Shell|Network)|ActiveXObject\\s*\\(\\s*[\"\\x27](MSXML2\\.XMLHTTP|WScript\\.Shell|ADODB\\.Stream)",
+            "weight": 0.6,
+            "type": "regex"
+          },
+          {
+            "pattern": "\\.Run\\s*\\(|\\.ShellExecute",
+            "weight": 0.3,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:dropper",
+        "note": "JScript dropper via WSH/ActiveX"
+      },
+      "decode_exec_chain": {
+        "signatures": [
+          {
+            "pattern": "(eval|Function|document\\.write|setTimeout)\\s*\\([\\s\\S]{0,80}(atob|unescape|fromCharCode|decodeURIComponent)",
+            "weight": 0.6,
+            "type": "regex"
+          }
+        ],
+        "confidence": 0.6,
+        "detectionCount": 0,
+        "successRate": 0,
+        "successCount": 0,
+        "handler": "malware:loader",
+        "note": "decode result flowing into exec sink"
+      }
+    }
+  },
+  "fingerprints": {
+    "52236f98fa9d9c61": {
+      "seen": 19,
+      "ok": 19,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 206,
+        "hasRotation": true,
+        "decoderCount": 2,
+        "encodings": [
+          "base64",
+          "hex_escape",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.68,
+        "score": 88
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T23:57:08.343Z"
+    },
+    "fbb9ed8808391052": {
+      "seen": 1,
+      "ok": 1,
+      "family": "unknown",
+      "route": "obfuscator_static",
+      "features": {
+        "arrayLen": 0,
+        "hasRotation": false,
+        "decoderCount": 0,
+        "encodings": [
+          "eval_unescape",
+          "eval_generic"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 0,
+        "score": 28
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-12T19:34:34.550Z"
+    },
+    "dca1802045d699fa": {
+      "seen": 1,
+      "ok": 1,
+      "family": "unknown",
+      "route": "obfuscator_static",
+      "features": {
+        "arrayLen": 0,
+        "hasRotation": false,
+        "decoderCount": 0,
+        "encodings": [
+          "hex_escape",
+          "unicode_escape"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 0,
+        "score": 16
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-12T19:34:34.990Z"
+    },
+    "94257a3ba1dfba0a": {
+      "seen": 1,
+      "ok": 1,
+      "family": "unknown",
+      "route": "obfuscator_static",
+      "features": {
+        "arrayLen": 0,
+        "hasRotation": false,
+        "decoderCount": 0,
+        "encodings": [
+          "base64",
+          "base64_atob"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.08,
+        "score": 22
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-12T19:34:35.417Z"
+    },
+    "a087a1a7d160dea1": {
+      "seen": 1,
+      "ok": 1,
+      "family": "unknown",
+      "route": "obfuscator_static",
+      "features": {
+        "arrayLen": 0,
+        "hasRotation": false,
+        "decoderCount": 0,
+        "encodings": [
+          "string_concat"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 0,
+        "score": 8
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-12T19:34:35.846Z"
+    },
+    "e55a2bfdb21973cc": {
+      "seen": 1,
+      "ok": 1,
+      "family": "unknown",
+      "route": "obfuscator_static",
+      "features": {
+        "arrayLen": 0,
+        "hasRotation": false,
+        "decoderCount": 0,
+        "encodings": [
+          "base64",
+          "base64_atob",
+          "eval_generic"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.25,
+        "score": 32
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-12T19:34:36.259Z"
+    },
+    "2cd15aaba799c3e8": {
+      "seen": 7,
+      "ok": 7,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 287,
+        "hasRotation": true,
+        "decoderCount": 2,
+        "encodings": [
+          "base64",
+          "hex_escape",
+          "unicode_escape",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.77,
+        "score": 96
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T23:31:55.353Z"
+    },
+    "cdcb86acc7557bf9": {
+      "seen": 7,
+      "ok": 7,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 336,
+        "hasRotation": true,
+        "decoderCount": 2,
+        "encodings": [
+          "base64",
+          "hex_escape",
+          "unicode_escape",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.84,
+        "score": 100
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T23:31:59.418Z"
+    },
+    "8aa177f52d82f572": {
+      "seen": 7,
+      "ok": 7,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 2003,
+        "hasRotation": true,
+        "decoderCount": 2,
+        "encodings": [
+          "base64",
+          "hex_escape",
+          "unicode_escape",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.76,
+        "score": 100
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T23:30:37.987Z"
+    },
+    "c4bccbe383b76488": {
+      "seen": 2,
+      "ok": 2,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 20,
+        "hasRotation": true,
+        "decoderCount": 1,
+        "encodings": [
+          "base64",
+          "hex_escape",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.69,
+        "score": 88
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T18:37:56.973Z"
+    },
+    "1826289e636af281": {
+      "seen": 1,
+      "ok": 1,
+      "family": "obfuscator_io",
+      "route": "obfuscator_dynamic",
+      "features": {
+        "arrayLen": 27,
+        "hasRotation": true,
+        "decoderCount": 1,
+        "encodings": [
+          "base64",
+          "hex_numbers",
+          "computed_prop"
+        ],
+        "antiDebug": [],
+        "isVM": false,
+        "entropy": 5.63,
+        "score": 80
+      },
+      "successRate": 1,
+      "lastSeen": "2026-07-13T23:40:34.823Z"
+    }
+  },
+  "learned": [],
+  "statistics": {
+    "successfulDeobfuscations": 49,
+    "failedDeobfuscations": 0,
+    "patternsLearned": 11
+  }
+}

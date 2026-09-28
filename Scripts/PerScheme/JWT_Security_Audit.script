@@ -1,0 +1,187 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+function classJWTAudit(scheme, inputIndex) {
+    this.scheme = scheme;
+    this.inputIndex = inputIndex;
+    this.variations = scheme.selectVariationsForInput(inputIndex);
+    this.currentVariation = 0;
+    this.foundVulnOnVariation = false;
+    this.lastJob = null;
+}
+
+classJWTAudit.prototype.request = function(value) {
+    this.scheme.loadVariation(this.variations.item(this.currentVariation));
+    this.scheme.setInputValue(this.inputIndex, value);
+    this.lastJob = new THTTPJob();
+    this.lastJob.url = targetUrl;
+    scheme.populateRequest(this.lastJob);
+    this.lastJob.execute();
+    return (!this.lastJob.wasError);
+};
+
+classJWTAudit.prototype.requestWithHeader = function(headerName, headerValue) {
+    this.lastJob = new THTTPJob();
+    this.lastJob.url = targetUrl;
+    this.lastJob.URI = this.scheme.path;
+    this.lastJob.request.addHeader(headerName, headerValue);
+    this.lastJob.execute();
+    return (!this.lastJob.wasError);
+};
+
+classJWTAudit.prototype.alert = function(testValue, vulnName, details) {
+    this.foundVulnOnVariation = true;
+    var ri = new TReportItem();
+    ri.LoadFromFile("NodeJs_injection.xml");
+    ri.affects = this.scheme.path;
+    ri.alertPath = "Scripts/JWT";
+    ri.parameter = this.scheme.getInputName(this.inputIndex);
+    ri.parameterValue = testValue.substring(0, 100);
+    ri.setHttpInfo(this.lastJob);
+    ri.name = vulnName;
+    ri.severity = 3;
+    ri.details = details;
+    AddReportItem(ri);
+};
+
+classJWTAudit.prototype.isJWT = function(value) {
+    if (!value) return false;
+    var parts = value.split(".");
+    if (parts.length != 3) return false;
+    try {
+        var header = b642plain(parts[0].replace(/-/g, "+").replace(/_/g, "/"));
+        if (header.indexOf('"alg"') != -1) return true;
+    } catch(e) {}
+    return false;
+};
+
+classJWTAudit.prototype.decodeJWT = function(token) {
+    var parts = token.split(".");
+    var result = { header: null, payload: null, raw: parts };
+    try {
+        var h = b642plain(parts[0].replace(/-/g, "+").replace(/_/g, "/"));
+        result.header = JSON.parse(h);
+    } catch(e) {}
+    try {
+        var p = b642plain(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+        result.payload = JSON.parse(p);
+    } catch(e) {}
+    return result;
+};
+
+classJWTAudit.prototype.forgeJWT = function(header, payload) {
+    var h = plain2b64(JSON.stringify(header)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+    var p = plain2b64(JSON.stringify(payload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+    return h + "." + p + ".";
+};
+
+classJWTAudit.prototype.startTesting = function() {
+    for (var v = 0; v < this.variations.count; v++) {
+        if (this.foundVulnOnVariation) break;
+        this.currentVariation = v;
+        this.scheme.loadVariation(this.variations.item(v));
+
+        var origValue = this.scheme.getInputValue(this.inputIndex);
+        if (!this.isJWT(origValue)) continue;
+
+        var jwt = this.decodeJWT(origValue);
+        if (!jwt.header || !jwt.payload) continue;
+
+        // Test 1: alg=none bypass
+        var noneHeader = { alg: "none", typ: jwt.header.typ || "JWT" };
+        var noneToken = this.forgeJWT(noneHeader, jwt.payload);
+
+        if (this.request(noneToken)) {
+            if (this.lastJob.response.msg2 == 200 || this.lastJob.response.msg2 == 302) {
+                // verify original still works
+                if (this.request(origValue) && this.lastJob.response.msg2 == 200) {
+                    this.alert(noneToken, "JWT Algorithm None Bypass",
+                        "The application accepts JWT tokens with [bold]alg: none[/bold]. " +
+                        "An attacker can forge arbitrary tokens without knowing the secret key.");
+                    continue;
+                }
+            }
+        }
+
+        // Test 1b: alg=None/NONE/nOnE variants
+        var noneVariants = ["None", "NONE", "nOnE"];
+        for (var ni = 0; ni < noneVariants.length; ni++) {
+            noneHeader = { alg: noneVariants[ni], typ: jwt.header.typ || "JWT" };
+            noneToken = this.forgeJWT(noneHeader, jwt.payload);
+            if (this.request(noneToken)) {
+                if (this.lastJob.response.msg2 == 200) {
+                    this.alert(noneToken, "JWT Algorithm None Bypass (variant: " + noneVariants[ni] + ")",
+                        "JWT accepted with alg=" + noneVariants[ni]);
+                    break;
+                }
+            }
+        }
+
+        // Test 2: Empty signature
+        var emptySignature = jwt.raw[0] + "." + jwt.raw[1] + ".";
+        if (this.request(emptySignature)) {
+            if (this.lastJob.response.msg2 == 200) {
+                this.alert(emptySignature, "JWT Empty Signature Accepted",
+                    "The application accepts JWT tokens with an [bold]empty signature[/bold].");
+                continue;
+            }
+        }
+
+        // Test 3: Check for sensitive data in payload (info disclosure)
+        var payloadStr = JSON.stringify(jwt.payload);
+        var sensitiveFields = ["password", "secret", "private_key", "apiKey", "api_key",
+                               "ssn", "credit_card", "cc_number"];
+        for (var si = 0; si < sensitiveFields.length; si++) {
+            if (payloadStr.toLowerCase().indexOf(sensitiveFields[si]) != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("NodeJs_injection.xml");
+                ri.affects = this.scheme.path;
+                ri.alertPath = "Scripts/JWT";
+                ri.parameter = this.scheme.getInputName(this.inputIndex);
+                ri.name = "JWT Contains Sensitive Data";
+                ri.severity = 2;
+                ri.details = "JWT payload contains potentially sensitive field: [bold]" +
+                    sensitiveFields[si] + "[/bold][break]Payload: " +
+                    payloadStr.substring(0, 200);
+                AddReportItem(ri);
+                break;
+            }
+        }
+
+        // Test 4: Expired token still accepted
+        if (jwt.payload.exp) {
+            var now = Math.floor(Date.now() / 1000);
+            if (jwt.payload.exp < now) {
+                // token is expired, check if still accepted
+                if (this.request(origValue)) {
+                    if (this.lastJob.response.msg2 == 200) {
+                        var ri = new TReportItem();
+                        ri.LoadFromFile("NodeJs_injection.xml");
+                        ri.affects = this.scheme.path;
+                        ri.alertPath = "Scripts/JWT";
+                        ri.parameter = this.scheme.getInputName(this.inputIndex);
+                        ri.name = "Expired JWT Token Accepted";
+                        ri.severity = 2;
+                        ri.details = "Expired JWT token (exp: " + jwt.payload.exp +
+                            ", now: " + now + ") is still accepted by the server.";
+                        ri.setHttpInfo(this.lastJob);
+                        AddReportItem(ri);
+                    }
+                }
+            }
+        }
+    }
+};
+
+// main -- check both input values and cookies/headers
+for (var i = 0; i < scheme.inputCount; i++) {
+    var tester = new classJWTAudit(scheme, i);
+    tester.startTesting();
+    ScriptProgress(ComputeProgress(i, scheme.inputCount));
+    tester = null;
+}

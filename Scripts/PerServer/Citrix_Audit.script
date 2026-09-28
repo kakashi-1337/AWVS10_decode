@@ -1,0 +1,188 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Citrix ADC/Gateway/NetScaler CVEs, Citrix Virtual Apps/ShareFile
+
+function testCitrixDetection() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/vpn/index.html";
+    job.execute();
+
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/logon/LogonPoint/tmindex.html";
+    job2.execute();
+
+    var detected = false;
+    if (!job.wasError && job.response.msg2 == 200) {
+        if (job.response.body.indexOf("Citrix") != -1 || job.response.body.indexOf("NetScaler") != -1 ||
+            job.response.body.indexOf("citrix") != -1) {
+            detected = true;
+        }
+    }
+    if (!job2.wasError && job2.response.msg2 == 200) {
+        if (job2.response.body.indexOf("Citrix") != -1 || job2.response.body.indexOf("StoreFront") != -1) {
+            detected = true;
+        }
+    }
+    return detected;
+}
+
+function testCitrixCVEs() {
+    // CVE-2023-3519 - Citrix ADC/Gateway RCE (unauthenticated)
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/gwtest/formssso?event=start&target=" + encodeURIComponent("http://127.0.0.1");
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 != 404) {
+        var body = job.response.body;
+        if (body.indexOf("gwtest") != -1 || body.indexOf("formssso") != -1 ||
+            job.response.msg2 == 200 || job.response.msg2 == 500) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/gwtest/formssso";
+            ri.alertPath = "Scripts/Citrix";
+            ri.name = "Citrix ADC/Gateway - gwtest Endpoint Active (CVE-2023-3519 vector)";
+            ri.severity = 4;
+            ri.setHttpInfo(job);
+            ri.details = "Citrix Gateway gwtest/formssso endpoint responds.[break]" +
+                "CVE-2023-3519 exploits this endpoint for unauthenticated RCE via stack buffer overflow.[break]" +
+                "Actively exploited in the wild. CVSS 9.8.";
+            AddReportItem(ri);
+        }
+    }
+
+    // CVE-2023-4966 - Citrix Bleed (information disclosure / session hijack)
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/oauth/idp/.well-known/openid-configuration";
+    job2.execute();
+
+    if (!job2.wasError && job2.response.msg2 == 200) {
+        var body2 = job2.response.body;
+        if (body2.indexOf("issuer") != -1 || body2.indexOf("authorization_endpoint") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/oauth/idp/.well-known/openid-configuration";
+            ri.alertPath = "Scripts/Citrix";
+            ri.name = "Citrix ADC OAuth/OIDC Endpoint (CVE-2023-4966 Citrix Bleed vector)";
+            ri.severity = 4;
+            ri.setHttpInfo(job2);
+            ri.details = "Citrix ADC OAuth endpoint responds.[break]" +
+                "CVE-2023-4966 (Citrix Bleed) leaks session tokens from this endpoint's buffer.[break]" +
+                "Unauthenticated attackers can hijack active sessions. CVSS 9.4.";
+            AddReportItem(ri);
+        }
+    }
+
+    // CVE-2019-19781 - Path traversal RCE (Shitrix)
+    var traversalPaths = [
+        "/vpn/../vpns/cfg/smb.conf",
+        "/vpn/../vpns/portal/scripts/newbm.pl",
+        "/vpns/cfg/smb.conf",
+        "/vpns/portal/scripts/newbm.pl",
+    ];
+
+    for (var i = 0; i < traversalPaths.length; i++) {
+        var job3 = new THTTPJob();
+        job3.url = targetUrl;
+        job3.URI = traversalPaths[i];
+        job3.execute();
+
+        if (!job3.wasError && job3.response.msg2 == 200) {
+            var body3 = job3.response.body;
+            if (body3.indexOf("[global]") != -1 || body3.indexOf("perl") != -1 ||
+                body3.indexOf("smb") != -1 || body3.indexOf("#!/") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = traversalPaths[i];
+                ri.alertPath = "Scripts/Citrix";
+                ri.name = "Citrix ADC Path Traversal (CVE-2019-19781)";
+                ri.severity = 4;
+                ri.setHttpInfo(job3);
+                ri.details = "Citrix ADC path traversal confirmed.[break]" +
+                    "CVE-2019-19781 enables unauthenticated RCE via directory traversal + template injection.[break]" +
+                    "Write Perl template to vpns/portal/scripts/ for code execution.";
+                AddReportItem(ri);
+                break;
+            }
+        }
+    }
+
+    // CVE-2020-8193/8195/8196 - Auth bypass + info disclosure
+    var job4 = new THTTPJob();
+    job4.url = targetUrl;
+    job4.URI = "/pcidss/report?type=allprofiles&sid=loginchallengeresponse1requestbody&username=nsroot&set=1";
+    job4.execute();
+
+    if (!job4.wasError && job4.response.msg2 == 200) {
+        if (job4.response.body.indexOf("nsroot") != -1 || job4.response.body.indexOf("profile") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/pcidss/report";
+            ri.alertPath = "Scripts/Citrix";
+            ri.name = "Citrix ADC Auth Bypass (CVE-2020-8193)";
+            ri.severity = 4;
+            ri.setHttpInfo(job4);
+            ri.details = "Citrix ADC authentication bypass via pcidss/report endpoint.[break]" +
+                "CVE-2020-8193/8195/8196 chain for unauthorized access to NSIP management.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testCitrixEndpoints() {
+    var endpoints = [
+        { path: "/vpn/index.html", desc: "VPN gateway login", sev: 1 },
+        { path: "/logon/LogonPoint/tmindex.html", desc: "StoreFront login", sev: 1 },
+        { path: "/Citrix/StoreWeb/", desc: "Citrix StoreFront", sev: 1 },
+        { path: "/cgi/login", desc: "CGI login endpoint", sev: 1 },
+        { path: "/menu/neo", desc: "NetScaler management", sev: 2 },
+        { path: "/menu/ss", desc: "system status", sev: 2 },
+        { path: "/menu/guiw", desc: "GUI wizard", sev: 2 },
+        { path: "/rpc/xa_getconfig.pl", desc: "config disclosure", sev: 3 },
+        { path: "/nsconfig/ns.conf", desc: "NetScaler config file", sev: 4 },
+        { path: "/vpn/pluginlist.xml", desc: "VPN plugin list", sev: 1 },
+    ];
+
+    for (var i = 0; i < endpoints.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = endpoints[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var report = false;
+
+            if (endpoints[i].path.indexOf("ns.conf") != -1 && (body.indexOf("set") != -1 || body.indexOf("add") != -1)) report = true;
+            if (endpoints[i].path.indexOf("xa_getconfig") != -1 && body.indexOf("config") != -1) report = true;
+            if (endpoints[i].path.indexOf("menu") != -1 && (body.indexOf("Citrix") != -1 || body.indexOf("NetScaler") != -1)) report = true;
+            if (endpoints[i].path.indexOf("pluginlist") != -1 && body.indexOf("plugin") != -1) report = true;
+            if (endpoints[i].sev >= 3 && body.length > 100) report = true;
+
+            if (report) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = endpoints[i].path;
+                ri.alertPath = "Scripts/Citrix";
+                ri.name = "Citrix: " + endpoints[i].desc;
+                ri.severity = endpoints[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "Citrix endpoint accessible: [bold]" + endpoints[i].path + "[/bold]";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+if (testCitrixDetection()) {
+    testCitrixCVEs();
+    testCitrixEndpoints();
+} else {
+    testCitrixCVEs();
+}

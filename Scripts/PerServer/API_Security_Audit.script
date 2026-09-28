@@ -1,0 +1,427 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// API Security - REST, GraphQL, gRPC-web, OpenAPI, JWT, CORS, rate limiting
+
+function findAPIPaths() {
+    var found = [];
+    var probes = [
+        "/api", "/api/", "/api/v1", "/api/v2", "/api/v3",
+        "/v1", "/v2", "/v3",
+        "/rest", "/rest/api",
+        "/graphql", "/api/graphql", "/gql",
+        "/swagger.json", "/openapi.json",
+        "/api-docs", "/swagger-ui/",
+    ];
+
+    for (var i = 0; i < probes.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = probes[i];
+        job.execute();
+        if (!job.wasError && job.response.msg2 != 404 && job.response.msg2 != 405) {
+            found.push({ path: probes[i], status: job.response.msg2, body: job.response.body, job: job });
+        }
+    }
+    return found;
+}
+
+function testOpenAPIExposure() {
+    var schemaPaths = [
+        "/swagger.json", "/openapi.json", "/api-docs",
+        "/swagger/v1/swagger.json", "/api/swagger.json",
+        "/v2/api-docs", "/v3/api-docs",
+        "/swagger-ui/", "/swagger-ui.html",
+        "/redoc", "/docs",
+        "/api/docs", "/api/schema/",
+        "/_catalog",
+    ];
+
+    for (var i = 0; i < schemaPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = schemaPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isSchema = body.indexOf("\"openapi\"") != -1 || body.indexOf("\"swagger\"") != -1 ||
+                           body.indexOf("\"paths\"") != -1 || body.indexOf("\"info\"") != -1 && body.indexOf("\"title\"") != -1;
+            var isUI = body.indexOf("swagger-ui") != -1 || body.indexOf("SwaggerUIBundle") != -1 ||
+                       body.indexOf("redoc") != -1 || body.indexOf("api-docs") != -1;
+
+            if (isSchema || isUI) {
+                var hasSensitive = body.indexOf("/admin") != -1 || body.indexOf("/internal") != -1 ||
+                    body.indexOf("/debug") != -1 || body.indexOf("password") != -1 ||
+                    body.indexOf("token") != -1 || body.indexOf("secret") != -1;
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = schemaPaths[i];
+                ri.alertPath = "Scripts/API";
+                ri.name = "API Documentation/Schema Exposed";
+                ri.severity = hasSensitive ? 2 : 1;
+                ri.setHttpInfo(job);
+                ri.details = "API documentation at [bold]" + schemaPaths[i] + "[/bold].[break]" +
+                    "Reveals endpoint structure, parameters, auth schemes, data models." +
+                    (hasSensitive ? "[break]References to sensitive endpoints found." : "");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testGraphQLSecurity() {
+    var gqlPaths = ["/graphql", "/api/graphql", "/gql", "/query", "/graphiql"];
+
+    for (var i = 0; i < gqlPaths.length; i++) {
+        // introspection check
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = gqlPaths[i];
+        job.verb = "POST";
+        job.request.addHeader("Content-Type", "application/json");
+        job.postData = '{"query":"{__schema{queryType{name}mutationType{name}types{name kind fields{name type{name}}}}}"}';
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("__schema") != -1 && body.indexOf("queryType") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = gqlPaths[i];
+                ri.alertPath = "Scripts/API";
+                ri.name = "GraphQL Full Introspection Enabled";
+                ri.severity = 2;
+                ri.setHttpInfo(job);
+
+                var hasMutations = body.indexOf("mutationType") != -1 && body.indexOf("null") == -1;
+                var hasUserType = body.indexOf("User") != -1 || body.indexOf("Account") != -1;
+                ri.details = "GraphQL full schema introspection enabled at [bold]" + gqlPaths[i] + "[/bold].[break]" +
+                    "Types, queries, mutations, and field structure fully exposed." +
+                    (hasMutations ? "[break]Mutations available - test for unauthorized write operations." : "") +
+                    (hasUserType ? "[break]User/Account types found - test for IDOR via user queries." : "");
+                AddReportItem(ri);
+
+                // field suggestion / DoS via deeply nested query
+                var nestedQuery = '{"query":"query{__typename ' + new Array(20).join("... on __Schema{types{name fields{name type{name ofType{name") + new Array(20).join("}") + '}}"}';
+                var jobNest = new THTTPJob();
+                jobNest.url = targetUrl;
+                jobNest.URI = gqlPaths[i];
+                jobNest.verb = "POST";
+                jobNest.request.addHeader("Content-Type", "application/json");
+                jobNest.postData = '{"query":"{ __schema { types { name fields { name type { name ofType { name ofType { name ofType { name }}}}}}}}"}';
+                jobNest.execute();
+                if (!jobNest.wasError && jobNest.response.msg2 == 200) {
+                    var nestBody = jobNest.response.body;
+                    if (nestBody.indexOf("ofType") != -1 && nestBody.length > 5000) {
+                        var ri2 = new TReportItem();
+                        ri2.LoadFromFile("Application_Error.xml");
+                        ri2.affects = gqlPaths[i];
+                        ri2.alertPath = "Scripts/API";
+                        ri2.name = "GraphQL No Query Depth Limit";
+                        ri2.severity = 2;
+                        ri2.setHttpInfo(jobNest);
+                        ri2.details = "GraphQL allows deeply nested queries without depth limiting.[break]" +
+                            "Enables resource exhaustion attacks via nested introspection.";
+                        AddReportItem(ri2);
+                    }
+                }
+
+                // batch query
+                var jobBatch = new THTTPJob();
+                jobBatch.url = targetUrl;
+                jobBatch.URI = gqlPaths[i];
+                jobBatch.verb = "POST";
+                jobBatch.request.addHeader("Content-Type", "application/json");
+                jobBatch.postData = '[{"query":"{__typename}"},{"query":"{__typename}"},{"query":"{__typename}"}]';
+                jobBatch.execute();
+                if (!jobBatch.wasError && jobBatch.response.msg2 == 200) {
+                    var batchBody = jobBatch.response.body;
+                    if (batchBody.charAt(0) == '[' && batchBody.indexOf("__typename") != -1) {
+                        var ri3 = new TReportItem();
+                        ri3.LoadFromFile("Application_Error.xml");
+                        ri3.affects = gqlPaths[i];
+                        ri3.alertPath = "Scripts/API";
+                        ri3.name = "GraphQL Batch Query Enabled";
+                        ri3.severity = 1;
+                        ri3.setHttpInfo(jobBatch);
+                        ri3.details = "GraphQL accepts batched queries in array format.[break]" +
+                            "Enables brute-force attacks that bypass per-request rate limiting.";
+                        AddReportItem(ri3);
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+function testJWTWeakness() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    // check for JWT in response headers or cookies
+    var authHeader = job.response.headerValue("authorization");
+    var setCookie = job.response.headerValue("set-cookie");
+    var body = job.response.body;
+
+    // look for JWTs in common places
+    var jwtRegex = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+    var jwtSources = [authHeader, setCookie, body];
+    var jwt = null;
+    for (var i = 0; i < jwtSources.length; i++) {
+        var match = jwtSources[i].match(jwtRegex);
+        if (match) { jwt = match[0]; break; }
+    }
+
+    if (!jwt) {
+        // try login-style endpoints
+        var loginPaths = ["/api/auth/login", "/api/login", "/auth/token", "/oauth/token", "/api/token"];
+        for (var i = 0; i < loginPaths.length; i++) {
+            var loginJob = new THTTPJob();
+            loginJob.url = targetUrl;
+            loginJob.URI = loginPaths[i];
+            loginJob.verb = "POST";
+            loginJob.request.addHeader("Content-Type", "application/json");
+            loginJob.postData = '{"username":"test","password":"test"}';
+            loginJob.execute();
+            if (!loginJob.wasError) {
+                var loginBody = loginJob.response.body;
+                var loginMatch = loginBody.match(jwtRegex);
+                if (loginMatch) { jwt = loginMatch[0]; break; }
+            }
+        }
+    }
+
+    if (!jwt) return;
+
+    // decode header to check algorithm
+    var headerPart = jwt.split(".")[0];
+    // add padding
+    while (headerPart.length % 4 != 0) headerPart += "=";
+    headerPart = headerPart.replace(/-/g, "+").replace(/_/g, "/");
+
+    try {
+        var decoded = b642plain(headerPart);
+        if (decoded.indexOf("\"none\"") != -1 || decoded.indexOf("\"None\"") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/API";
+            ri.name = "JWT Algorithm None Accepted";
+            ri.severity = 4;
+            ri.setHttpInfo(job);
+            ri.details = "JWT uses 'none' algorithm - tokens can be forged without a key.[break]" +
+                "Header: " + decoded;
+            AddReportItem(ri);
+        }
+        if (decoded.indexOf("\"HS256\"") != -1 || decoded.indexOf("\"HS384\"") != -1 || decoded.indexOf("\"HS512\"") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/API";
+            ri.name = "JWT HMAC Symmetric Signing Detected";
+            ri.severity = 1;
+            ri.setHttpInfo(job);
+            ri.details = "JWT uses HMAC symmetric signing.[break]" +
+                "If secret is weak, tokens can be brute-forced. Test for alg confusion (RS256->HS256).";
+            AddReportItem(ri);
+        }
+    } catch(e) {}
+}
+
+function testCORSMisconfig() {
+    var apiPaths = ["/", "/api", "/api/v1"];
+    var origins = [
+        { origin: "https://evil.com", desc: "arbitrary origin" },
+        { origin: "null", desc: "null origin" },
+    ];
+
+    for (var i = 0; i < apiPaths.length; i++) {
+        for (var j = 0; j < origins.length; j++) {
+            var job = new THTTPJob();
+            job.url = targetUrl;
+            job.URI = apiPaths[i];
+            job.request.addHeader("Origin", origins[j].origin);
+            job.execute();
+
+            if (!job.wasError) {
+                var acao = job.response.headerValue("access-control-allow-origin");
+                var acac = job.response.headerValue("access-control-allow-credentials");
+
+                if ((acao == origins[j].origin || acao == "null") && acac.toLowerCase() == "true") {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = apiPaths[i];
+                    ri.alertPath = "Scripts/API";
+                    ri.name = "CORS: " + origins[j].desc + " Reflected with Credentials";
+                    ri.severity = 3;
+                    ri.setHttpInfo(job);
+                    ri.details = "Origin [bold]" + origins[j].origin + "[/bold] is reflected in ACAO with credentials allowed.[break]" +
+                        "Attacker can read authenticated API responses cross-origin via JS.";
+                    AddReportItem(ri);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+function testAPIVersioning() {
+    // check if older API versions are still active (may lack newer security patches)
+    var versions = ["v1", "v2", "v3"];
+    var activeVersions = [];
+
+    for (var i = 0; i < versions.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = "/api/" + versions[i] + "/";
+        job.execute();
+        if (!job.wasError && job.response.msg2 != 404) {
+            activeVersions.push(versions[i]);
+        }
+    }
+
+    if (activeVersions.length > 1) {
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = "/api/";
+        ri.alertPath = "Scripts/API";
+        ri.name = "Multiple API Versions Active";
+        ri.severity = 1;
+        ri.setHttpInfo(new THTTPJob());
+        ri.details = "Multiple API versions respond: " + activeVersions.join(", ") + ".[break]" +
+            "Older versions may lack security patches. Test deprecated endpoints for auth bypass.";
+        AddReportItem(ri);
+    }
+}
+
+function testAPIRateLimiting() {
+    var testPath = "/api/";
+    var job0 = new THTTPJob();
+    job0.url = targetUrl;
+    job0.URI = testPath;
+    job0.execute();
+    if (job0.wasError || job0.response.msg2 == 404) {
+        testPath = "/";
+    }
+
+    // send rapid requests and check for rate limit headers
+    var hasRateLimit = false;
+    for (var i = 0; i < 3; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = testPath;
+        job.execute();
+        if (job.wasError) break;
+
+        if (job.response.headerValue("x-ratelimit-limit") != "" ||
+            job.response.headerValue("x-rate-limit-limit") != "" ||
+            job.response.headerValue("ratelimit-limit") != "" ||
+            job.response.headerValue("retry-after") != "" ||
+            job.response.msg2 == 429) {
+            hasRateLimit = true;
+            break;
+        }
+    }
+}
+
+function testAPIMethodOverride() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/api/";
+    job.verb = "GET";
+    job.request.addHeader("X-HTTP-Method-Override", "DELETE");
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 != 404) {
+        var job2 = new THTTPJob();
+        job2.url = targetUrl;
+        job2.URI = "/api/";
+        job2.verb = "GET";
+        job2.execute();
+
+        if (!job2.wasError && job.response.msg2 != job2.response.msg2) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/api/";
+            ri.alertPath = "Scripts/API";
+            ri.name = "HTTP Method Override Accepted";
+            ri.severity = 2;
+            ri.setHttpInfo(job);
+            ri.details = "X-HTTP-Method-Override header changes request method.[break]" +
+                "GET with X-HTTP-Method-Override:DELETE returned " + job.response.msg2 +
+                " vs normal GET " + job2.response.msg2 + ".[break]" +
+                "Can bypass method-based access controls.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testActuatorEndpoints() {
+    // Spring Boot actuator, but also common in other frameworks
+    var actuatorPaths = [
+        { path: "/actuator", key: "_links" },
+        { path: "/actuator/env", key: "propertySources" },
+        { path: "/actuator/health", key: "status" },
+        { path: "/actuator/mappings", key: "contexts" },
+        { path: "/actuator/beans", key: "contexts" },
+        { path: "/actuator/configprops", key: "contexts" },
+        { path: "/actuator/heapdump", key: null },
+        { path: "/actuator/threaddump", key: "threads" },
+        { path: "/metrics", key: "names" },
+        { path: "/info", key: "build" },
+    ];
+
+    for (var i = 0; i < actuatorPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = actuatorPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var isActuator = false;
+
+            if (actuatorPaths[i].path == "/actuator/heapdump") {
+                if (body.length > 1000) isActuator = true;
+            } else if (actuatorPaths[i].key && body.indexOf(actuatorPaths[i].key) != -1) {
+                isActuator = true;
+            }
+
+            if (isActuator) {
+                var sev = 2;
+                if (actuatorPaths[i].path.indexOf("env") != -1) sev = 4;
+                if (actuatorPaths[i].path.indexOf("heapdump") != -1) sev = 4;
+                if (actuatorPaths[i].path.indexOf("configprops") != -1) sev = 3;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = actuatorPaths[i].path;
+                ri.alertPath = "Scripts/API";
+                ri.name = "Management Endpoint Exposed: " + actuatorPaths[i].path;
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = "Management/actuator endpoint accessible.[break]" +
+                    (sev >= 3 ? "May expose credentials, environment variables, or heap memory." : "Reveals application internals.");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function startTesting() {
+    testOpenAPIExposure();
+    testGraphQLSecurity();
+    testJWTWeakness();
+    testCORSMisconfig();
+    testAPIVersioning();
+    testAPIRateLimiting();
+    testAPIMethodOverride();
+    testActuatorEndpoints();
+}

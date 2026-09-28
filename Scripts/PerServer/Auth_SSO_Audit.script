@@ -1,0 +1,339 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Authentication, SSO, OAuth, SAML, OIDC, password reset, session management
+
+function testOAuthEndpoints() {
+    var oauthPaths = [
+        { path: "/.well-known/openid-configuration", marker: "issuer", name: "OIDC Discovery" },
+        { path: "/.well-known/oauth-authorization-server", marker: "issuer", name: "OAuth Server Metadata" },
+        { path: "/oauth/authorize", marker: null, name: "OAuth Authorize" },
+        { path: "/oauth/token", marker: null, name: "OAuth Token" },
+        { path: "/oauth2/authorize", marker: null, name: "OAuth2 Authorize" },
+        { path: "/oauth2/token", marker: null, name: "OAuth2 Token" },
+        { path: "/authorize", marker: null, name: "Authorize endpoint" },
+        { path: "/connect/authorize", marker: null, name: "OIDC Authorize" },
+        { path: "/connect/token", marker: null, name: "OIDC Token" },
+    ];
+
+    for (var i = 0; i < oauthPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = oauthPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 != 404) {
+            var body = job.response.body;
+
+            // OIDC discovery document
+            if (oauthPaths[i].marker && body.indexOf(oauthPaths[i].marker) != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = oauthPaths[i].path;
+                ri.alertPath = "Scripts/Auth";
+                ri.name = "OpenID Connect Discovery Exposed";
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = oauthPaths[i].name + " at [bold]" + oauthPaths[i].path + "[/bold].[break]" +
+                    "Reveals all authentication endpoints, supported scopes, grant types, and signing algorithms.";
+                AddReportItem(ri);
+
+                // check for weak alg support
+                if (body.indexOf("\"none\"") != -1) {
+                    var ri2 = new TReportItem();
+                    ri2.LoadFromFile("Application_Error.xml");
+                    ri2.affects = oauthPaths[i].path;
+                    ri2.alertPath = "Scripts/Auth";
+                    ri2.name = "OIDC Supports 'none' Algorithm";
+                    ri2.severity = 4;
+                    ri2.setHttpInfo(job);
+                    ri2.details = "OIDC configuration lists 'none' as supported signing algorithm.[break]" +
+                        "Tokens can be forged without any cryptographic key.";
+                    AddReportItem(ri2);
+                }
+
+                // check for implicit flow (less secure)
+                if (body.indexOf("implicit") != -1) {
+                    var ri3 = new TReportItem();
+                    ri3.LoadFromFile("Application_Error.xml");
+                    ri3.affects = oauthPaths[i].path;
+                    ri3.alertPath = "Scripts/Auth";
+                    ri3.name = "OAuth Implicit Flow Supported";
+                    ri3.severity = 1;
+                    ri3.setHttpInfo(job);
+                    ri3.details = "OAuth implicit grant type is supported. Tokens returned in URL fragment.[break]" +
+                        "Implicit flow is deprecated in OAuth 2.1 due to token leakage via browser history and referer.";
+                    AddReportItem(ri3);
+                }
+                break;
+            }
+        }
+    }
+}
+
+function testSAMLEndpoints() {
+    var samlPaths = [
+        "/saml/metadata",
+        "/saml2/metadata",
+        "/FederationMetadata/2007-06/FederationMetadata.xml",
+        "/saml/SSO",
+        "/adfs/ls/",
+        "/simplesaml/",
+        "/simplesaml/module.php/core/frontpage_welcome.php",
+        "/saml/metadata.xml",
+        "/auth/saml/metadata",
+    ];
+
+    for (var i = 0; i < samlPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = samlPaths[i];
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf("EntityDescriptor") != -1 || body.indexOf("saml") != -1 && body.indexOf("SSO") != -1 ||
+                body.indexOf("SimpleSAML") != -1 || body.indexOf("ADFS") != -1) {
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = samlPaths[i];
+                ri.alertPath = "Scripts/Auth";
+                ri.name = "SAML Metadata/Endpoint Exposed";
+                ri.severity = 1;
+                ri.setHttpInfo(job);
+                ri.details = "SAML endpoint at [bold]" + samlPaths[i] + "[/bold].[break]" +
+                    "Reveals IdP/SP entity ID, signing certificates, SSO/SLO URLs.[break]" +
+                    "Test for XML signature wrapping, assertion replay, and certificate confusion.";
+                AddReportItem(ri);
+
+                // SimpleSAMLphp admin
+                if (body.indexOf("SimpleSAML") != -1) {
+                    var adminJob = new THTTPJob();
+                    adminJob.url = targetUrl;
+                    adminJob.URI = "/simplesaml/module.php/core/loginuserpass.php";
+                    adminJob.execute();
+                    if (!adminJob.wasError && adminJob.response.msg2 == 200 && adminJob.response.body.indexOf("password") != -1) {
+                        var ri2 = new TReportItem();
+                        ri2.LoadFromFile("Application_Error.xml");
+                        ri2.affects = "/simplesaml/";
+                        ri2.alertPath = "Scripts/Auth";
+                        ri2.name = "SimpleSAMLphp Admin Login Exposed";
+                        ri2.severity = 2;
+                        ri2.setHttpInfo(adminJob);
+                        ri2.details = "SimpleSAMLphp admin login page accessible.[break]" +
+                            "Default credentials: admin/123 or admin/secret.";
+                        AddReportItem(ri2);
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+function testPasswordResetFlaws() {
+    var resetPaths = [
+        "/password_reset", "/forgot-password", "/reset-password",
+        "/api/auth/forgot-password", "/api/password/reset",
+        "/api/v1/auth/forgot-password", "/users/password/new",
+        "/account/forgot-password",
+    ];
+
+    for (var i = 0; i < resetPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = resetPaths[i];
+        job.execute();
+        if (job.wasError || job.response.msg2 == 404) continue;
+
+        if (job.response.msg2 == 200 || job.response.msg2 == 405) {
+            // test for user enumeration via different responses
+            var job2 = new THTTPJob();
+            job2.url = targetUrl;
+            job2.URI = resetPaths[i];
+            job2.verb = "POST";
+            job2.request.addHeader("Content-Type", "application/json");
+            job2.postData = '{"email":"genki_nonexistent_' + Math.random().toString(36).substring(7) + '@example.com"}';
+            job2.execute();
+
+            var job3 = new THTTPJob();
+            job3.url = targetUrl;
+            job3.URI = resetPaths[i];
+            job3.verb = "POST";
+            job3.request.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            job3.postData = "email=genki_nonexistent_" + Math.random().toString(36).substring(7) + "@example.com";
+            job3.execute();
+
+            // check if response differentiates between existing/nonexistent users
+            var responseToCheck = !job2.wasError ? job2 : (!job3.wasError ? job3 : null);
+            if (responseToCheck) {
+                var respBody = responseToCheck.response.body;
+                if (respBody.indexOf("not found") != -1 || respBody.indexOf("does not exist") != -1 ||
+                    respBody.indexOf("no account") != -1 || respBody.indexOf("not registered") != -1 ||
+                    respBody.indexOf("invalid email") != -1 && respBody.indexOf("not") != -1) {
+                    var ri = new TReportItem();
+                    ri.LoadFromFile("Application_Error.xml");
+                    ri.affects = resetPaths[i];
+                    ri.alertPath = "Scripts/Auth";
+                    ri.name = "User Enumeration via Password Reset";
+                    ri.severity = 2;
+                    ri.setHttpInfo(responseToCheck);
+                    ri.details = "Password reset reveals whether email exists.[break]" +
+                        "Response differentiates between registered and unregistered emails.[break]" +
+                        "Enables user enumeration for credential stuffing and targeted attacks.";
+                    AddReportItem(ri);
+                }
+            }
+            break;
+        }
+    }
+}
+
+function testSessionManagement() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    var setCookie = job.response.headerValue("set-cookie");
+    if (setCookie == "") return;
+
+    var cookies = setCookie.split(",");
+    for (var i = 0; i < cookies.length; i++) {
+        var cookie = cookies[i].trim();
+        var isSessionCookie = cookie.indexOf("session") != -1 || cookie.indexOf("SESS") != -1 ||
+            cookie.indexOf("PHPSESSID") != -1 || cookie.indexOf("JSESSIONID") != -1 ||
+            cookie.indexOf("connect.sid") != -1 || cookie.indexOf("ASP.NET_SessionId") != -1 ||
+            cookie.indexOf("_session") != -1 || cookie.indexOf("auth") != -1;
+
+        if (!isSessionCookie) continue;
+
+        var cookieLower = cookie.toLowerCase();
+
+        if (cookieLower.indexOf("httponly") == -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/";
+            ri.alertPath = "Scripts/Auth";
+            ri.name = "Session Cookie Missing HttpOnly Flag";
+            ri.severity = 2;
+            ri.setHttpInfo(job);
+            ri.details = "Session cookie set without HttpOnly flag.[break]" +
+                "Cookie accessible via JavaScript (document.cookie), enabling XSS-based session hijacking.";
+            AddReportItem(ri);
+        }
+
+        if (cookieLower.indexOf("secure") == -1 && targetUrl.url.indexOf("https") == 0) {
+            var ri2 = new TReportItem();
+            ri2.LoadFromFile("Application_Error.xml");
+            ri2.affects = "/";
+            ri2.alertPath = "Scripts/Auth";
+            ri2.name = "Session Cookie Missing Secure Flag (HTTPS)";
+            ri2.severity = 2;
+            ri2.setHttpInfo(job);
+            ri2.details = "HTTPS site sets session cookie without Secure flag.[break]" +
+                "Cookie can be intercepted over HTTP via MITM or mixed content.";
+            AddReportItem(ri2);
+        }
+
+        if (cookieLower.indexOf("samesite") == -1) {
+            var ri3 = new TReportItem();
+            ri3.LoadFromFile("Application_Error.xml");
+            ri3.affects = "/";
+            ri3.alertPath = "Scripts/Auth";
+            ri3.name = "Session Cookie Missing SameSite Attribute";
+            ri3.severity = 1;
+            ri3.setHttpInfo(job);
+            ri3.details = "Session cookie without SameSite attribute.[break]" +
+                "Vulnerable to CSRF attacks in browsers that default to SameSite=None.";
+            AddReportItem(ri3);
+        }
+        break;
+    }
+}
+
+function testDefaultCredentials() {
+    var loginPaths = [
+        "/login", "/admin/login", "/api/login",
+        "/admin", "/administrator", "/auth/login",
+    ];
+
+    for (var i = 0; i < loginPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = loginPaths[i];
+        job.execute();
+        if (job.wasError || job.response.msg2 == 404) continue;
+        if (job.response.body.indexOf("password") == -1 && job.response.body.indexOf("login") == -1) continue;
+
+        // only report that login page exists, do not brute-force
+        var ri = new TReportItem();
+        ri.LoadFromFile("Application_Error.xml");
+        ri.affects = loginPaths[i];
+        ri.alertPath = "Scripts/Auth";
+        ri.name = "Login Page Found";
+        ri.severity = 0;
+        ri.setHttpInfo(job);
+        ri.details = "Login page accessible at [bold]" + loginPaths[i] + "[/bold].[break]" +
+            "Test for weak credentials, account lockout policy, and brute-force protection.";
+        AddReportItem(ri);
+        break;
+    }
+}
+
+function testFirebaseAuth() {
+    // Firebase misconfig - common in modern SPAs
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/";
+    job.execute();
+    if (job.wasError) return;
+
+    var body = job.response.body;
+    var fbMatch = body.match(/["\']apiKey["\']\s*:\s*["\']([^"\']+)["\']/);
+    var fbProjectMatch = body.match(/["\']projectId["\']\s*:\s*["\']([^"\']+)["\']/);
+
+    if (fbMatch && fbProjectMatch) {
+        var apiKey = fbMatch[1];
+        var projectId = fbProjectMatch[1];
+
+        // check if sign-up is enabled with the exposed API key
+        var signupJob = new THTTPJob();
+        signupJob.url = new TURL("https://identitytoolkit.googleapis.com");
+        signupJob.URI = "/v1/accounts:signUp?key=" + apiKey;
+        signupJob.verb = "POST";
+        signupJob.request.addHeader("Content-Type", "application/json");
+        signupJob.postData = '{"returnSecureToken":true}';
+        signupJob.execute();
+
+        if (!signupJob.wasError && signupJob.response.msg2 == 200) {
+            var signupBody = signupJob.response.body;
+            if (signupBody.indexOf("idToken") != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = "/";
+                ri.alertPath = "Scripts/Auth";
+                ri.name = "Firebase Anonymous Auth Enabled";
+                ri.severity = 3;
+                ri.setHttpInfo(signupJob);
+                ri.details = "Firebase project [bold]" + projectId + "[/bold] allows anonymous sign-up.[break]" +
+                    "API Key: " + apiKey.substring(0, 10) + "...[break]" +
+                    "Test Firestore/RTDB rules with the obtained token for data access.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function startTesting() {
+    testOAuthEndpoints();
+    testSAMLEndpoints();
+    testPasswordResetFlaws();
+    testSessionManagement();
+    testDefaultCredentials();
+    testFirebaseAuth();
+}

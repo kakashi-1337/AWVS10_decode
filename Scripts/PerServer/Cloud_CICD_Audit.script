@@ -1,0 +1,312 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+
+// Cloud misconfig, CI/CD exposure, container registry, git leak, backup files
+
+function testGitExposure() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/.git/HEAD";
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 == 200) {
+        var body = job.response.body;
+        if (body.indexOf("ref:") != -1 && body.indexOf("refs/") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/.git/HEAD";
+            ri.alertPath = "Scripts/Cloud";
+            ri.name = "Git Repository Exposed (.git/HEAD)";
+            ri.severity = 4;
+            ri.setHttpInfo(job);
+            ri.details = "Full .git directory accessible. Source code can be reconstructed.[break]" +
+                "Branch: " + body.trim() + "[break]" +
+                "Use git-dumper to extract complete repository history including secrets.";
+            AddReportItem(ri);
+
+            // try to get config for remote URLs
+            var job2 = new THTTPJob();
+            job2.url = targetUrl;
+            job2.URI = "/.git/config";
+            job2.execute();
+            if (!job2.wasError && job2.response.msg2 == 200 && job2.response.body.indexOf("[core]") != -1) {
+                var ri2 = new TReportItem();
+                ri2.LoadFromFile("Application_Error.xml");
+                ri2.affects = "/.git/config";
+                ri2.alertPath = "Scripts/Cloud";
+                ri2.name = "Git Config Exposed (Remote URLs)";
+                ri2.severity = 3;
+                ri2.setHttpInfo(job2);
+                ri2.details = "Git config reveals remote repository URLs, author info.";
+                AddReportItem(ri2);
+            }
+        }
+    }
+}
+
+function testSVNExposure() {
+    var job = new THTTPJob();
+    job.url = targetUrl;
+    job.URI = "/.svn/entries";
+    job.execute();
+
+    if (!job.wasError && job.response.msg2 == 200) {
+        var body = job.response.body;
+        if (body.indexOf("dir") != -1 || body.match(/^\d+/) || body.indexOf("svn") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/.svn/entries";
+            ri.alertPath = "Scripts/Cloud";
+            ri.name = "SVN Repository Exposed";
+            ri.severity = 3;
+            ri.setHttpInfo(job);
+            ri.details = ".svn directory accessible. Source code and commit history can be extracted.";
+            AddReportItem(ri);
+        }
+    }
+
+    var job2 = new THTTPJob();
+    job2.url = targetUrl;
+    job2.URI = "/.svn/wc.db";
+    job2.execute();
+    if (!job2.wasError && job2.response.msg2 == 200 && job2.response.body.length > 100) {
+        if (job2.response.body.substring(0, 6) == "SQLite" || job2.response.body.indexOf("SQLite") != -1) {
+            var ri = new TReportItem();
+            ri.LoadFromFile("Application_Error.xml");
+            ri.affects = "/.svn/wc.db";
+            ri.alertPath = "Scripts/Cloud";
+            ri.name = "SVN Working Copy Database Exposed";
+            ri.severity = 3;
+            ri.setHttpInfo(job2);
+            ri.details = "SVN wc.db SQLite database accessible. Contains full file listing and metadata.";
+            AddReportItem(ri);
+        }
+    }
+}
+
+function testCICDExposure() {
+    var ciPaths = [
+        { path: "/.github/workflows/", marker: "on:", desc: "GitHub Actions workflows" },
+        { path: "/.gitlab-ci.yml", marker: "stages", desc: "GitLab CI config" },
+        { path: "/Jenkinsfile", marker: "pipeline", desc: "Jenkins pipeline" },
+        { path: "/.circleci/config.yml", marker: "jobs", desc: "CircleCI config" },
+        { path: "/.travis.yml", marker: "language", desc: "Travis CI config" },
+        { path: "/bitbucket-pipelines.yml", marker: "pipelines", desc: "Bitbucket Pipelines" },
+        { path: "/azure-pipelines.yml", marker: "trigger", desc: "Azure DevOps pipeline" },
+        { path: "/cloudbuild.yaml", marker: "steps", desc: "Google Cloud Build" },
+        { path: "/buildspec.yml", marker: "phases", desc: "AWS CodeBuild spec" },
+        { path: "/.drone.yml", marker: "kind", desc: "Drone CI config" },
+    ];
+
+    for (var i = 0; i < ciPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = ciPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(ciPaths[i].marker) != -1) {
+                var hasSecrets = body.indexOf("secret") != -1 || body.indexOf("token") != -1 ||
+                    body.indexOf("password") != -1 || body.indexOf("credential") != -1 ||
+                    body.indexOf("AWS_") != -1 || body.indexOf("DOCKER_") != -1;
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = ciPaths[i].path;
+                ri.alertPath = "Scripts/Cloud";
+                ri.name = "CI/CD Config Exposed: " + ciPaths[i].desc;
+                ri.severity = hasSecrets ? 3 : 2;
+                ri.setHttpInfo(job);
+                ri.details = ciPaths[i].desc + " accessible at [bold]" + ciPaths[i].path + "[/bold].[break]" +
+                    "Reveals build process, deployment targets, and test infrastructure." +
+                    (hasSecrets ? "[break]References to secrets/credentials found in config." : "");
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testDockerExposure() {
+    var dockerPaths = [
+        { path: "/Dockerfile", marker: "FROM", sev: 2 },
+        { path: "/docker-compose.yml", marker: "services", sev: 2 },
+        { path: "/docker-compose.yaml", marker: "services", sev: 2 },
+        { path: "/.dockerignore", marker: "node_modules", sev: 1 },
+        { path: "/v2/_catalog", marker: "repositories", sev: 4 },
+        { path: "/v2/", marker: "{}",  sev: 3 },
+    ];
+
+    for (var i = 0; i < dockerPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = dockerPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(dockerPaths[i].marker) != -1 ||
+                (dockerPaths[i].path == "/v2/" && body == "{}" || body == "{}\\n")) {
+
+                var name = "Docker File Exposed: " + dockerPaths[i].path;
+                if (dockerPaths[i].path.indexOf("/v2/") != -1) {
+                    name = "Docker Registry API Accessible";
+                }
+
+                var hasCreds = body.indexOf("password") != -1 || body.indexOf("secret") != -1 ||
+                    body.indexOf("AWS_") != -1;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = dockerPaths[i].path;
+                ri.alertPath = "Scripts/Cloud";
+                ri.name = name;
+                ri.severity = hasCreds ? dockerPaths[i].sev + 1 : dockerPaths[i].sev;
+                if (ri.severity > 4) ri.severity = 4;
+                ri.setHttpInfo(job);
+                ri.details = "[bold]" + dockerPaths[i].path + "[/bold] accessible.[break]" +
+                    "Reveals base images, build steps, environment variables, exposed ports.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testBackupFiles() {
+    var backupPaths = [
+        { path: "/backup.sql", markers: ["CREATE TABLE", "INSERT INTO", "DROP TABLE"] },
+        { path: "/backup.sql.gz", markers: null },
+        { path: "/db.sql", markers: ["CREATE TABLE", "INSERT INTO"] },
+        { path: "/dump.sql", markers: ["CREATE TABLE", "INSERT INTO"] },
+        { path: "/database.sql", markers: ["CREATE TABLE", "INSERT INTO"] },
+        { path: "/backup.zip", markers: null },
+        { path: "/backup.tar.gz", markers: null },
+        { path: "/site.zip", markers: null },
+        { path: "/www.zip", markers: null },
+        { path: "/htdocs.zip", markers: null },
+        { path: "/web.config.bak", markers: ["configuration", "connectionStrings"] },
+        { path: "/wp-config.php.bak", markers: ["DB_NAME", "DB_PASSWORD"] },
+        { path: "/config.php.bak", markers: ["password", "database"] },
+        { path: "/.htpasswd", markers: [":$", ":{SHA}"] },
+        { path: "/.htaccess", markers: ["RewriteRule", "Deny from"] },
+    ];
+
+    for (var i = 0; i < backupPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = backupPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            var ct = job.response.headerValue("content-type") || "";
+            var isBackup = false;
+
+            if (backupPaths[i].markers) {
+                for (var j = 0; j < backupPaths[i].markers.length; j++) {
+                    if (body.indexOf(backupPaths[i].markers[j]) != -1) { isBackup = true; break; }
+                }
+            } else {
+                // binary files - check content-type and size
+                isBackup = (ct.indexOf("application/") != -1 || ct.indexOf("octet-stream") != -1) && body.length > 500;
+                if (ct.indexOf("text/html") != -1) isBackup = false;
+            }
+
+            if (isBackup) {
+                var sev = 3;
+                if (backupPaths[i].path.indexOf(".sql") != -1) sev = 4;
+                if (backupPaths[i].path.indexOf("config") != -1) sev = 4;
+                if (backupPaths[i].path.indexOf("htpasswd") != -1) sev = 3;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = backupPaths[i].path;
+                ri.alertPath = "Scripts/Cloud";
+                ri.name = "Backup/Sensitive File Exposed: " + backupPaths[i].path;
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = "Backup or sensitive file accessible at [bold]" + backupPaths[i].path + "[/bold].[break]" +
+                    "May contain database dumps, credentials, source code, or configuration.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testAWSMisconfiguration() {
+    var awsPaths = [
+        { path: "/.aws/credentials", marker: "aws_access_key_id", sev: 4 },
+        { path: "/.aws/config", marker: "region", sev: 2 },
+        { path: "/aws.yml", marker: "aws", sev: 3 },
+        { path: "/s3.yml", marker: "bucket", sev: 2 },
+    ];
+
+    for (var i = 0; i < awsPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = awsPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(awsPaths[i].marker) != -1) {
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = awsPaths[i].path;
+                ri.alertPath = "Scripts/Cloud";
+                ri.name = "AWS Configuration Exposed";
+                ri.severity = awsPaths[i].sev;
+                ri.setHttpInfo(job);
+                ri.details = "AWS config file at [bold]" + awsPaths[i].path + "[/bold].[break]" +
+                    "May contain access keys, secret keys, and region configuration.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function testTerraformState() {
+    var tfPaths = [
+        { path: "/terraform.tfstate", marker: "terraform_version" },
+        { path: "/terraform.tfstate.backup", marker: "terraform_version" },
+        { path: "/.terraform/", marker: "provider" },
+        { path: "/terraform.tfvars", marker: "=" },
+    ];
+
+    for (var i = 0; i < tfPaths.length; i++) {
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.URI = tfPaths[i].path;
+        job.execute();
+
+        if (!job.wasError && job.response.msg2 == 200) {
+            var body = job.response.body;
+            if (body.indexOf(tfPaths[i].marker) != -1) {
+                var sev = 4;
+                if (tfPaths[i].path.indexOf("tfvars") != -1) sev = 3;
+
+                var ri = new TReportItem();
+                ri.LoadFromFile("Application_Error.xml");
+                ri.affects = tfPaths[i].path;
+                ri.alertPath = "Scripts/Cloud";
+                ri.name = "Terraform State/Config Exposed";
+                ri.severity = sev;
+                ri.setHttpInfo(job);
+                ri.details = "Terraform file at [bold]" + tfPaths[i].path + "[/bold].[break]" +
+                    "State files contain all resource details, secrets, and infrastructure configuration.";
+                AddReportItem(ri);
+            }
+        }
+    }
+}
+
+function startTesting() {
+    testGitExposure();
+    testSVNExposure();
+    testCICDExposure();
+    testDockerExposure();
+    testBackupFiles();
+    testAWSMisconfiguration();
+    testTerraformState();
+}

